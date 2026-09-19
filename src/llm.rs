@@ -34,6 +34,51 @@ impl LlmBackend for MockLlm {
     async fn relevance_check(&self, _m: &str, _c: u32, _t: Vec<ChatTurn>) -> anyhow::Result<Relevance> { Ok(self.relevance) }
 }
 
+pub struct OllamaClient { base_url: String, http: reqwest::Client }
+
+impl OllamaClient {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build().expect("reqwest client"),
+        }
+    }
+
+    async fn chat(&self, model: &str, msgs: Vec<serde_json::Value>, opts: serde_json::Value)
+        -> anyhow::Result<String>
+    {
+        let body = serde_json::json!({ "model": model, "messages": msgs, "stream": false, "options": opts });
+        let resp = self.http.post(format!("{}/api/chat", self.base_url))
+            .json(&body).send().await?.error_for_status()?;
+        let v: serde_json::Value = resp.json().await?;
+        Ok(v["message"]["content"].as_str().unwrap_or_default().trim().to_string())
+    }
+}
+
+const RELEVANCE_SYS: &str = "You decide whether the assistant should chime in UNPROMPTED to a group chat. \
+Reply with ONLY a JSON object: {\"should_reply\": bool, \"confidence\": number 0..1}. \
+Set should_reply true only if the assistant can add clear value right now.";
+
+#[async_trait]
+impl LlmBackend for OllamaClient {
+    async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<String> {
+        let mut msgs = vec![serde_json::json!({"role":"system","content": req.system})];
+        msgs.extend(req.turns.iter().map(turn_json));
+        let opts = serde_json::json!({"temperature": req.temperature, "top_p": req.top_p, "num_ctx": req.num_ctx});
+        self.chat(&req.model, msgs, opts).await
+    }
+
+    async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>) -> anyhow::Result<Relevance> {
+        let mut msgs = vec![serde_json::json!({"role":"system","content": RELEVANCE_SYS})];
+        msgs.extend(turns.iter().map(turn_json));
+        let opts = serde_json::json!({"temperature": 0.0, "num_ctx": num_ctx, "num_predict": 40});
+        let raw = self.chat(model, msgs, opts).await?;
+        Ok(parse_relevance(&raw))
+    }
+}
+
 // helper used by both real client and prompt building
 pub(crate) fn turn_json(t: &ChatTurn) -> serde_json::Value {
     let content = match &t.name {
