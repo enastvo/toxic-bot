@@ -1,5 +1,7 @@
 use crate::types::{ReplyMode, Room, StoredMessage, Role};
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::password_hash::{rand_core::OsRng, SaltString};
 
 #[derive(Clone)]
 pub struct Store { pool: SqlitePool }
@@ -61,6 +63,27 @@ impl Store {
         sqlx::query("UPDATE rooms SET reply_mode = ?, updated_at = ? WHERE room_id = ?")
             .bind(mode.as_str()).bind(now_ms()).bind(room_id).execute(&self.pool).await?;
         Ok(())
+    }
+
+    pub async fn set_admin(&self, username: &str, password: &str) -> anyhow::Result<()> {
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = Argon2::default().hash_password(password.as_bytes(), &salt)
+            .map_err(|e| anyhow::anyhow!("hash: {e}"))?.to_string();
+        sqlx::query("INSERT INTO admin (id, username, password_hash) VALUES (1, ?, ?)
+                     ON CONFLICT(id) DO UPDATE SET username=excluded.username, password_hash=excluded.password_hash")
+            .bind(username).bind(hash).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn verify_admin(&self, username: &str, password: &str) -> anyhow::Result<bool> {
+        let row = sqlx::query("SELECT username, password_hash FROM admin WHERE id = 1")
+            .fetch_optional(&self.pool).await?;
+        let Some(row) = row else { return Ok(false) };
+        use sqlx::Row;
+        if row.get::<String,_>("username") != username { return Ok(false); }
+        let stored: String = row.get("password_hash");
+        let parsed = PasswordHash::new(&stored).map_err(|e| anyhow::anyhow!("parse hash: {e}"))?;
+        Ok(Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
     }
 
     pub fn pool(&self) -> &SqlitePool { &self.pool }
@@ -155,5 +178,14 @@ mod tests {
         let recent = s.recent("g1", 3).await.unwrap();
         assert_eq!(recent.len(), 3);
         assert_eq!(recent.iter().map(|m| m.body.clone()).collect::<Vec<_>>(), vec!["m2","m3","m4"]);
+    }
+
+    #[tokio::test]
+    async fn admin_password_roundtrip() {
+        let s = mem().await;
+        s.set_admin("admin", "s3cret").await.unwrap();
+        assert!(s.verify_admin("admin", "s3cret").await.unwrap());
+        assert!(!s.verify_admin("admin", "wrong").await.unwrap());
+        assert!(!s.verify_admin("nobody", "s3cret").await.unwrap());
     }
 }

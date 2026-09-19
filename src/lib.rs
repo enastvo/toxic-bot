@@ -5,6 +5,6 @@ pub mod personalities;
 pub mod llm;
 pub mod signal;
 pub mod router;
+pub mod config;
 // modules added as tasks land:
-// pub mod config;
 // pub mod repl; pub mod web;
