@@ -96,7 +96,7 @@ impl Router {
             let rel = self.llm.relevance_check(&personality.model, personality.num_ctx, turns.clone()).await?;
             tracing::debug!(room=%room.room_id, should=rel.should_reply, conf=rel.confidence, thr=personality.proactive.relevance_threshold, "relevance");
             if !rel.should_reply || rel.confidence < personality.proactive.relevance_threshold { return Ok(None); }
-            if !self.rl.allow(&room.room_id, personality.proactive.cooldown_secs, personality.proactive.max_per_hour, now_secs()) {
+            if !self.dry_run && !self.rl.allow(&room.room_id, personality.proactive.cooldown_secs, personality.proactive.max_per_hour, now_secs()) {
                 tracing::debug!(room=%room.room_id, "proactive rate-limited");
                 return Ok(None);
             }

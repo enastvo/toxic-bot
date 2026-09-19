@@ -60,6 +60,25 @@ async fn proactive_below_threshold_stays_silent() {
 }
 
 #[tokio::test]
+async fn dry_run_proactive_does_not_consume_rate_limit() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    store.ensure_room("G", Some("Grp"), true).await.unwrap();
+    store.set_reply_mode("G", ReplyMode::Proactive).await.unwrap();
+    let sig = Arc::new(MockSignal::new());
+    let llm = Arc::new(MockLlm { reply: "would say".into(), relevance: Relevance{should_reply:true, confidence:1.0} });
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), true);
+
+    let out1 = r.handle(incoming("G", true, false)).await.unwrap();
+    let out2 = r.handle(incoming("G", true, false)).await.unwrap();
+
+    // default personality's proactive cooldown_secs=60 would block the 2nd call
+    // within the same second if dry-run were consuming the rate limiter.
+    assert_eq!(out1.as_deref(), Some("would say"));
+    assert_eq!(out2.as_deref(), Some("would say"));
+    assert!(sig.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn dry_run_produces_reply_but_does_not_send() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let sig = Arc::new(MockSignal::new());
