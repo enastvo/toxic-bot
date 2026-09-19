@@ -80,7 +80,7 @@ pub async fn serve_tls(
     let addr: SocketAddr = bind.parse()?;
     let app = build_router(state);
     axum_server::bind_rustls(addr, config)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
     Ok(())
 }
