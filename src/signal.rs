@@ -231,8 +231,17 @@ impl SignalTransport for SignalCli {
         let w = guard.as_mut().ok_or_else(|| {
             anyhow::anyhow!("signal-cli socket for account {} is not connected", self.account)
         })?;
-        w.write_all(line.as_bytes()).await?;
-        w.flush().await?;
+        // Bound the write under the lock: if signal-cli stops draining its socket
+        // (connected but hung) an unbounded write here would hold `writer` forever,
+        // which would also block the supervisor task's disconnect-clearing write and
+        // stall failure-detection/respawn.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            w.write_all(line.as_bytes()).await?;
+            w.flush().await?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out writing to signal-cli socket"))??;
         Ok(())
     }
 }
