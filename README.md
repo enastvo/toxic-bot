@@ -165,9 +165,11 @@ Once the bot is deployed and the service is running, perform these checks on bot
 
 2. **Test the REPL**
    ```bash
-   cargo run --release -- --repl
+   sudo -u signal-bot /opt/signal-bot/signal-bot --config /etc/signal-bot/config.toml --repl --debug
    ```
-   Type a test message (e.g., `room-1|0|0|alice|hello, bot`). You should see a bot reply. Press Ctrl-D to exit.
+   Type a test message (e.g., `+me|0|0|Me|hello, bot`). You should see a `BOT>` reply. Press Ctrl-D to exit.
+   
+   (On a dev machine with source present, use `cargo run --release -- --repl` instead.)
 
 3. **Send a DM to the bot**
    - From your Signal account, send a DM to the bot's number (`+14433996053` by default)
