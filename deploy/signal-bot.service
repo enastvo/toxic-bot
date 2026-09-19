@@ -1,0 +1,23 @@
+[Unit]
+Description=Signal chat bot
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=signal-bot
+Group=signal-bot
+ExecStart=/opt/signal-bot/signal-bot --config /etc/signal-bot/config.toml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/signal-bot
+StateDirectory=signal-bot
+AmbientCapabilities=
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
