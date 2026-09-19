@@ -55,7 +55,6 @@ struct RoomTemplate {
     display_name: String,
     messages: Vec<MessageRow>,
     personalities: Vec<PersonalityOption>,
-    personality_is_default: bool,
     mode_addressed: bool,
     mode_always: bool,
     mode_proactive: bool,
@@ -183,7 +182,6 @@ pub async fn room_detail(State(state): State<AppState>, Path(room_id): Path<Stri
             display_name: room.display_name.unwrap_or(room.room_id),
             messages,
             personalities,
-            personality_is_default: current_personality == "default",
             mode_addressed: reply_mode == ReplyMode::Addressed,
             mode_always: reply_mode == ReplyMode::Always,
             mode_proactive: reply_mode == ReplyMode::Proactive,
@@ -198,6 +196,19 @@ pub async fn set_personality(
     Path(room_id): Path<String>,
     Form(form): Form<PersonalityForm>,
 ) -> Response {
+    // Validate the room exists before doing anything else: `room_id` comes
+    // straight from the URL path (percent-decoded) and is later reflected
+    // into a `Location` header via `Redirect::to`, which panics if the
+    // string contains control characters (e.g. CR/LF). Real room ids come
+    // from `ensure_room`/Signal group ids and never contain such bytes, so
+    // this existence check both gives a sane 404 for bogus ids and closes
+    // off that panic/DoS path.
+    match state.store.get_room(&room_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+
     let name = form.personality.trim();
     let value: Option<&str> = if name.is_empty() || name.eq_ignore_ascii_case("default") {
         None
@@ -220,6 +231,14 @@ pub async fn set_mode(
     Path(room_id): Path<String>,
     Form(form): Form<ModeForm>,
 ) -> Response {
+    // See set_personality: existence check first, both for a sane 404 and to
+    // avoid building a Location header from an unvalidated room id.
+    match state.store.get_room(&room_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+
     let Some(mode) = ReplyMode::parse(form.mode.trim()) else {
         return (StatusCode::BAD_REQUEST, "unknown reply mode").into_response();
     };

@@ -115,3 +115,55 @@ async fn authenticated_flow_login_view_and_assign_mode() {
     let room = store.get_room("G").await.unwrap().unwrap();
     assert_eq!(room.reply_mode, ReplyMode::Proactive);
 }
+
+/// Regression test: `set_mode`/`set_personality` used to build the redirect
+/// `Location` header from the raw, unvalidated `:id` path segment via
+/// `Redirect::to(&format!("/rooms/{room_id}"))`. Since `Redirect::to` panics
+/// (`HeaderValue::try_from(..).expect(..)`) on a string containing control
+/// characters, and a nonexistent/attacker-controlled room id was never
+/// checked for existence first, an authenticated admin could crash the
+/// request task by posting to an unknown room. The fix checks
+/// `store.get_room` first and returns 404 before doing anything else.
+#[tokio::test]
+async fn set_mode_on_unknown_room_is_not_found_not_a_panic() {
+    let (state, _store) = state().await;
+    let app = build_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from("username=admin&password=pw"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = session_cookie(&resp);
+
+    // "does-not-exist" was never created via ensure_room; the handler must
+    // 404 rather than proceed to build a redirect from an unvalidated id.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rooms/does-not-exist/mode")
+                .header(axum::http::header::COOKIE, cookie.clone())
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from("mode=proactive"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

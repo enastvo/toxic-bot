@@ -7,7 +7,6 @@
 <form class="inline" method="post" action="/rooms/{{ room_id }}/personality">
   <label for="personality">Personality</label>
   <select id="personality" name="personality">
-    <option value="default" {% if personality_is_default %}selected{% endif %}>default</option>
     {% for p in personalities %}
     <option value="{{ p.name }}" {% if p.selected %}selected{% endif %}>{{ p.name }}</option>
     {% endfor %}
