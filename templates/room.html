@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}{{ display_name }}{% endblock %}
+{% block content %}
+<p><a href="/">&larr; Rooms</a></p>
+<h1>{{ display_name }}</h1>
+
+<form class="inline" method="post" action="/rooms/{{ room_id }}/personality">
+  <label for="personality">Personality</label>
+  <select id="personality" name="personality">
+    <option value="default" {% if personality_is_default %}selected{% endif %}>default</option>
+    {% for p in personalities %}
+    <option value="{{ p.name }}" {% if p.selected %}selected{% endif %}>{{ p.name }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Set</button>
+</form>
+
+<form class="inline" method="post" action="/rooms/{{ room_id }}/mode">
+  <label for="mode">Mode</label>
+  <select id="mode" name="mode">
+    <option value="addressed" {% if mode_addressed %}selected{% endif %}>addressed</option>
+    <option value="always" {% if mode_always %}selected{% endif %}>always</option>
+    <option value="proactive" {% if mode_proactive %}selected{% endif %}>proactive</option>
+  </select>
+  <button type="submit">Set</button>
+</form>
+
+<h2>History</h2>
+<div id="history" data-room="{{ room_id }}">
+{% for m in messages %}
+  <div class="msg"><span class="who {{ m.role }}">{{ m.sender }}</span>{{ m.body }}</div>
+{% endfor %}
+</div>
+
+<script>
+(function () {
+  var container = document.getElementById('history');
+  var roomId = container.getAttribute('data-room');
+  if (!window.EventSource) { return; }
+  var es = new EventSource('/events');
+  es.addEventListener('message', function (ev) {
+    var data;
+    try { data = JSON.parse(ev.data); } catch (e) { return; }
+    if (!data || data.room_id !== roomId) { return; }
+    var div = document.createElement('div');
+    div.className = 'msg';
+    var who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = data.sender;
+    div.appendChild(who);
+    div.appendChild(document.createTextNode(data.body));
+    container.appendChild(div);
+  });
+})();
+</script>
+{% endblock %}
