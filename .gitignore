@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# Runtime data / secrets — never commit
+/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+config.local.toml
+*.pem
+*.key
+*.crt
+.env
+
+# signal-cli account data
+/signal-data/
+
+# Editor / OS
+.DS_Store
+*.swp
