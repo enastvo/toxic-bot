@@ -1,4 +1,5 @@
-use crate::types::{IncomingMessage, ReplyMode, Room};
+use crate::personalities::Personality;
+use crate::types::{ChatTurn, IncomingMessage, ReplyMode, Role, Room, StoredMessage};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -32,10 +33,29 @@ impl RateLimiter {
     }
 }
 
+pub fn build_turns(window: &[StoredMessage], bot_id: &str) -> Vec<ChatTurn> {
+    window.iter().map(|m| {
+        if m.role == Role::Assistant || m.sender_id == bot_id {
+            ChatTurn { role: Role::Assistant, name: None, content: m.body.clone() }
+        } else {
+            ChatTurn { role: Role::User, name: m.sender_name.clone().or_else(|| Some(m.sender_id.clone())), content: m.body.clone() }
+        }
+    }).collect()
+}
+
+pub fn system_prompt(personality: &Personality, room: &Room) -> String {
+    if room.is_group {
+        let name = room.display_name.as_deref().unwrap_or("a group");
+        format!("{}\n\nYou are in a Signal group named \"{}\". Multiple people talk here; each user message is prefixed with the speaker's name.", personality.system_prompt.trim(), name)
+    } else {
+        personality.system_prompt.trim().to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Decision, RateLimiter, decide};
-    use crate::types::{Room, ReplyMode, IncomingMessage};
+    use super::{Decision, RateLimiter, decide, build_turns};
+    use crate::types::{Room, ReplyMode, IncomingMessage, StoredMessage, Role};
 
     fn room(mode: ReplyMode, is_group: bool) -> Room {
         Room { room_id: "r".into(), display_name: None, is_group, personality: None, reply_mode: mode }
@@ -43,6 +63,21 @@ mod tests {
     fn msg(is_group: bool, mention: bool) -> IncomingMessage {
         IncomingMessage { room_id: "r".into(), sender_id: "u".into(), sender_name: None, body: "hi".into(),
             is_group, is_mention: mention, quoted_msg: None, timestamp: 0 }
+    }
+
+    fn sm(id: i64, sender: &str, role: Role, body: &str) -> StoredMessage {
+        StoredMessage { id, room_id: "r".into(), sender_id: sender.into(), sender_name: Some(sender.into()),
+            role, body: body.into(), ts: id, personality: None, is_mention: false }
+    }
+
+    #[test]
+    fn build_turns_marks_bot_as_assistant() {
+        let w = vec![ sm(1, "+1000", Role::User, "hi"), sm(2, "+bot", Role::Assistant, "hello") ];
+        let turns = build_turns(&w, "+bot");
+        assert_eq!(turns[0].role, Role::User);
+        assert_eq!(turns[0].name.as_deref(), Some("+1000"));
+        assert_eq!(turns[1].role, Role::Assistant);
+        assert!(turns[1].name.is_none());
     }
 
     #[test]
