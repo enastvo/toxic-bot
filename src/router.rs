@@ -1,7 +1,11 @@
-use crate::personalities::Personality;
+use crate::llm::{ChatRequest, LlmBackend};
+use crate::personalities::{Personalities, Personality};
+use crate::signal::SignalTransport;
+use crate::store::{NewMessage, Store};
 use crate::types::{ChatTurn, IncomingMessage, ReplyMode, Role, Room, StoredMessage};
+use crate::window::select_window;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision { Reply, Proactive, Silent }
@@ -49,6 +53,78 @@ pub fn system_prompt(personality: &Personality, room: &Room) -> String {
         format!("{}\n\nYou are in a Signal group named \"{}\". Multiple people talk here; each user message is prefixed with the speaker's name.", personality.system_prompt.trim(), name)
     } else {
         personality.system_prompt.trim().to_string()
+    }
+}
+
+pub struct Router {
+    store: Store,
+    personalities: Arc<Personalities>,
+    llm: Arc<dyn LlmBackend>,
+    signal: Arc<dyn SignalTransport>,
+    bot_id: String,
+    dry_run: bool,
+    rl: RateLimiter,
+}
+
+fn now_secs() -> u64 { time::OffsetDateTime::now_utc().unix_timestamp() as u64 }
+
+impl Router {
+    pub fn new(store: Store, personalities: Arc<Personalities>, llm: Arc<dyn LlmBackend>,
+               signal: Arc<dyn SignalTransport>, bot_id: String, dry_run: bool) -> Self {
+        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default() }
+    }
+
+    pub async fn handle(&self, msg: IncomingMessage) -> anyhow::Result<Option<String>> {
+        let room = self.store.ensure_room(&msg.room_id, msg.sender_name.as_deref().filter(|_| !msg.is_group), msg.is_group).await?;
+        self.store.record_message(NewMessage {
+            room_id: msg.room_id.clone(), sender_id: msg.sender_id.clone(), sender_name: msg.sender_name.clone(),
+            role: Role::User, body: msg.body.clone(), ts: msg.timestamp, personality: None, is_mention: msg.is_mention,
+        }).await?;
+
+        let personality = self.personalities.get_or_default(room.personality.as_deref());
+
+        let decision = decide(&room, &msg);
+        tracing::debug!(room=%room.room_id, ?decision, mode=?room.reply_mode, "routing");
+        if decision == Decision::Silent { return Ok(None); }
+
+        // build context window
+        let recent = self.store.recent(&room.room_id, 60).await?;
+        let window = select_window(&recent, personality.num_ctx);
+        let turns = build_turns(&window, &self.bot_id);
+
+        if decision == Decision::Proactive {
+            let rel = self.llm.relevance_check(&personality.model, personality.num_ctx, turns.clone()).await?;
+            tracing::debug!(room=%room.room_id, should=rel.should_reply, conf=rel.confidence, thr=personality.proactive.relevance_threshold, "relevance");
+            if !rel.should_reply || rel.confidence < personality.proactive.relevance_threshold { return Ok(None); }
+            if !self.rl.allow(&room.room_id, personality.proactive.cooldown_secs, personality.proactive.max_per_hour, now_secs()) {
+                tracing::debug!(room=%room.room_id, "proactive rate-limited");
+                return Ok(None);
+            }
+        }
+
+        let reply = self.llm.generate_reply(ChatRequest {
+            model: personality.model.clone(),
+            system: system_prompt(&personality, &room),
+            turns,
+            temperature: personality.temperature,
+            top_p: personality.top_p,
+            num_ctx: personality.num_ctx,
+        }).await?;
+
+        if reply.trim().is_empty() { return Ok(None); }
+
+        if self.dry_run {
+            tracing::info!(room=%room.room_id, %reply, "[dry-run] would send");
+            return Ok(Some(reply));
+        }
+
+        self.store.record_message(NewMessage {
+            room_id: room.room_id.clone(), sender_id: self.bot_id.clone(), sender_name: Some(personality.label.clone()),
+            role: Role::Assistant, body: reply.clone(), ts: now_secs() as i64 * 1000,
+            personality: Some(personality.name.clone()), is_mention: false,
+        }).await?;
+        self.signal.send(&room.room_id, room.is_group, &reply).await?;
+        Ok(Some(reply))
     }
 }
 
