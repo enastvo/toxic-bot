@@ -1,4 +1,4 @@
-use crate::types::{ReplyMode, Room};
+use crate::types::{ReplyMode, Room, StoredMessage, Role};
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 
 #[derive(Clone)]
@@ -66,10 +66,56 @@ impl Store {
     pub fn pool(&self) -> &SqlitePool { &self.pool }
 }
 
+pub struct NewMessage {
+    pub room_id: String,
+    pub sender_id: String,
+    pub sender_name: Option<String>,
+    pub role: Role,
+    pub body: String,
+    pub ts: i64,
+    pub personality: Option<String>,
+    pub is_mention: bool,
+}
+
+impl Store {
+    pub async fn record_message(&self, m: NewMessage) -> anyhow::Result<i64> {
+        let id = sqlx::query(
+            "INSERT INTO messages (room_id, sender_id, sender_name, role, body, ts, personality, is_mention)
+             VALUES (?,?,?,?,?,?,?,?)")
+            .bind(&m.room_id).bind(&m.sender_id).bind(&m.sender_name).bind(m.role.as_str())
+            .bind(&m.body).bind(m.ts).bind(&m.personality).bind(m.is_mention as i64)
+            .execute(&self.pool).await?.last_insert_rowid();
+        Ok(id)
+    }
+
+    fn row_to_msg(r: &sqlx::sqlite::SqliteRow) -> StoredMessage {
+        use sqlx::Row;
+        StoredMessage {
+            id: r.get("id"), room_id: r.get("room_id"), sender_id: r.get("sender_id"),
+            sender_name: r.get("sender_name"), role: Role::parse(r.get::<String,_>("role").as_str()),
+            body: r.get("body"), ts: r.get("ts"), personality: r.get("personality"),
+            is_mention: r.get::<i64,_>("is_mention") != 0,
+        }
+    }
+
+    pub async fn recent(&self, room_id: &str, limit: i64) -> anyhow::Result<Vec<StoredMessage>> {
+        // newest `limit`, then reverse to chronological
+        let rows = sqlx::query("SELECT * FROM messages WHERE room_id=? ORDER BY id DESC LIMIT ?")
+            .bind(room_id).bind(limit).fetch_all(&self.pool).await?;
+        let mut v: Vec<_> = rows.iter().map(Self::row_to_msg).collect();
+        v.reverse();
+        Ok(v)
+    }
+
+    pub async fn history(&self, room_id: &str, limit: i64) -> anyhow::Result<Vec<StoredMessage>> {
+        self.recent(room_id, limit).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ReplyMode;
+    use crate::types::{ReplyMode, Role};
 
     async fn mem() -> Store { Store::connect("sqlite::memory:").await.unwrap() }
 
@@ -94,5 +140,20 @@ mod tests {
         let r = s.get_room("g1").await.unwrap().unwrap();
         assert_eq!(r.personality.as_deref(), Some("sage"));
         assert_eq!(r.reply_mode, ReplyMode::Proactive);
+    }
+
+    #[tokio::test]
+    async fn record_and_recent_are_chronological() {
+        let s = mem().await;
+        s.ensure_room("g1", None, true).await.unwrap();
+        for i in 0..5 {
+            s.record_message(NewMessage {
+                room_id: "g1".into(), sender_id: "u".into(), sender_name: Some("U".into()),
+                role: Role::User, body: format!("m{i}"), ts: i, personality: None, is_mention: false,
+            }).await.unwrap();
+        }
+        let recent = s.recent("g1", 3).await.unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent.iter().map(|m| m.body.clone()).collect::<Vec<_>>(), vec!["m2","m3","m4"]);
     }
 }
