@@ -4,7 +4,7 @@ use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 #[derive(Clone)]
 pub struct Store { pool: SqlitePool }
 
-fn now_ms() -> i64 { time::OffsetDateTime::now_utc().unix_timestamp() * 1000 }
+fn now_ms() -> i64 { (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64 }
 
 impl Store {
     pub async fn connect(url: &str) -> anyhow::Result<Store> {
