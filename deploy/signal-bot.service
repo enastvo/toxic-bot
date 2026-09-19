@@ -16,6 +16,7 @@ ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/signal-bot
 StateDirectory=signal-bot
+StateDirectoryMode=0700
 AmbientCapabilities=
 CapabilityBoundingSet=
 

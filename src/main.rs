@@ -21,12 +21,16 @@ async fn main() -> anyhow::Result<()> {
     let cfg = AppConfig::load(&cli.config)?;
     let store = Store::connect(&cfg.db_url()).await?;
 
-    if let Some(spec) = cli.set_admin.as_deref() {
-        let (u, p) = spec
-            .split_once(':')
-            .ok_or_else(|| anyhow::anyhow!("use --set-admin user:pass"))?;
-        store.set_admin(u, p).await?;
-        println!("admin credential set for '{u}'");
+    if let Some(username) = cli.set_admin.as_deref() {
+        let password = std::env::var("SIGNAL_BOT_ADMIN_PASSWORD").unwrap_or_default();
+        if password.is_empty() {
+            eprintln!(
+                "error: --set-admin requires the SIGNAL_BOT_ADMIN_PASSWORD env var to be set (non-empty); refusing to read the password from argv"
+            );
+            std::process::exit(1);
+        }
+        store.set_admin(username, &password).await?;
+        println!("admin credential set for '{username}'");
         return Ok(());
     }
 

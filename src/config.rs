@@ -12,7 +12,9 @@ pub struct Cli {
     pub dry_run: bool,
     #[arg(long)]
     pub repl: bool,
-    /// Subcommand-less admin bootstrap: `--set-admin user:pass`
+    /// Subcommand-less admin bootstrap: `--set-admin username`.
+    /// The password is NOT taken from argv (visible via /proc/<pid>/cmdline);
+    /// it must be supplied via the `SIGNAL_BOT_ADMIN_PASSWORD` env var.
     #[arg(long)]
     pub set_admin: Option<String>,
 }

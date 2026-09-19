@@ -17,7 +17,9 @@ sudo install -m 0755 target/release/signal-bot /opt/signal-bot/signal-bot
 ./deploy/gen-cert.sh
 # 5. admin credential (prompts)
 read -rp "Web admin username: " U; read -rsp "Web admin password: " P; echo
-sudo -u signal-bot /opt/signal-bot/signal-bot --config /etc/signal-bot/config.toml --set-admin "$U:$P"
+# Pass the password via env, not argv: argv is world-readable via /proc/<pid>/cmdline,
+# while an env var is only readable by the process owner.
+sudo -u signal-bot env "SIGNAL_BOT_ADMIN_PASSWORD=$P" /opt/signal-bot/signal-bot --config /etc/signal-bot/config.toml --set-admin "$U"
 # 6. enable service (AFTER Signal registration in REGISTER.md)
 sudo install -m 0644 deploy/signal-bot.service /etc/systemd/system/signal-bot.service
 sudo systemctl daemon-reload
