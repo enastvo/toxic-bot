@@ -79,6 +79,23 @@ async fn dry_run_proactive_does_not_consume_rate_limit() {
 }
 
 #[tokio::test]
+async fn self_sent_message_is_ignored() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let sig = Arc::new(MockSignal::new());
+    let llm = Arc::new(MockLlm { reply: "should not be used".into(), relevance: Relevance{should_reply:true, confidence:1.0} });
+    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false);
+
+    let mut msg = incoming("+1000", false, false);
+    msg.sender_id = "+bot".into();
+    let out = r.handle(msg).await.unwrap();
+
+    assert!(out.is_none());
+    assert!(sig.sent.lock().unwrap().is_empty());
+    // the self-sent message must not even be recorded
+    assert_eq!(store.recent("+1000", 10).await.unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn dry_run_produces_reply_but_does_not_send() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let sig = Arc::new(MockSignal::new());

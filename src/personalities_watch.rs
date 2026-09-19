@@ -10,15 +10,10 @@ pub fn spawn(p: Arc<Personalities>, dir: PathBuf) {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut w = match notify::recommended_watcher(tx) { Ok(w) => w, Err(e) => { tracing::error!("watcher: {e}"); return; } };
         if let Err(e) = w.watch(&d1, RecursiveMode::NonRecursive) { tracing::error!("watch: {e}"); return; }
-        loop {
-            match rx.recv() {
-                Ok(_) => {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    while rx.try_recv().is_ok() {}
-                    match p1.reload(&d1) { Ok(_) => tracing::info!("personalities reloaded"), Err(e) => tracing::error!("reload: {e}") }
-                }
-                Err(_) => break,
-            }
+        while rx.recv().is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            while rx.try_recv().is_ok() {}
+            match p1.reload(&d1) { Ok(_) => tracing::info!("personalities reloaded"), Err(e) => tracing::error!("reload: {e}") }
         }
     });
 

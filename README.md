@@ -68,6 +68,10 @@ sudo systemctl enable --now signal-bot
 
 Open `https://bot.local:8443` on the LAN. You will need to trust the local TLS certificate (if self-signed, import the CA on your viewing device).
 
+### Network exposure / firewall
+
+By default `bind_addr` is `0.0.0.0:8443`, which listens on **all** network interfaces, not just the LAN — this is intentional since a home box's LAN IP is often DHCP-assigned and can't always be pinned down in config. This means **you must firewall port 8443 to LAN-only access** (e.g. a `ufw`/`iptables` rule scoped to your LAN subnet), otherwise the dashboard is reachable from the WAN if the host is ever exposed (port-forwarded, on a public interface, etc.). Alternatively, set `bind_addr` in `config.toml` to a specific LAN IP instead of `0.0.0.0` if your box has a static/reserved LAN address.
+
 1. Log in with the admin username and password set during setup
 2. Select a room from the dropdown
 3. Assign a **personality** (e.g., "Default", "Sage")

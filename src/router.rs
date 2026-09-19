@@ -75,6 +75,12 @@ impl Router {
     }
 
     pub async fn handle(&self, msg: IncomingMessage) -> anyhow::Result<Option<String>> {
+        // Defense-in-depth: never process/echo our own messages, even if a future
+        // signal-cli format change somehow delivered one back to us as incoming.
+        if msg.sender_id == self.bot_id {
+            return Ok(None);
+        }
+
         let room = self.store.ensure_room(&msg.room_id, msg.sender_name.as_deref().filter(|_| !msg.is_group), msg.is_group).await?;
         self.store.record_message(NewMessage {
             room_id: msg.room_id.clone(), sender_id: msg.sender_id.clone(), sender_name: msg.sender_name.clone(),
