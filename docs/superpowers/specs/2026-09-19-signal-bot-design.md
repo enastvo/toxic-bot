@@ -268,6 +268,24 @@ Fail safe; never crash the whole process.
 
 ## 8. Security
 
+### User / privilege model (two accounts)
+
+- **`bot`** — the interactive **admin** account (the SSH login). Member of
+  `sudo`. Used **only for provisioning**: installing packages, creating
+  the service account, writing the systemd unit, running the setup script.
+  Never runs the daemon in production.
+- **`signal-bot`** — a dedicated **system service account** (`--system`,
+  shell `/usr/sbin/nologin`, no password, **no sudo**) that runs the
+  daemon. Owns `/var/lib/signal-bot` (data, signal-cli keys, SQLite,
+  certs) mode `0700`; the app binary in `/opt/signal-bot` is read-only to
+  it. Runtime requires zero privilege, so the account has none — if the
+  service is ever compromised there is no path to root.
+- No blanket sudo for the service account. If a specific privileged action
+  is ever needed, add a narrow `NOPASSWD` sudoers rule scoped to that
+  exact command only.
+
+### Network / process hardening
+
 - Only inbound listener is the axum HTTPS port on the LAN interface,
   login-gated. signal-cli socket and Ollama are localhost/UNIX-socket
   only.
@@ -304,10 +322,14 @@ both tests and debug mode use.
 
 ## 10. Setup / registration flow
 
-A documented, mostly-scripted sequence run once on bot.local:
+A documented, mostly-scripted sequence run once on bot.local. Steps
+requiring privilege are run by the **`bot`** admin account via sudo; the
+daemon itself runs as the unprivileged **`signal-bot`** account (see §8).
 
 1. Install deps: `signal-cli` + JRE, `ollama`; `ollama pull qwen3:8b`.
-2. Create the service user + data dirs (restricted perms).
+2. Create the `signal-bot` system service account (`--system`, nologin,
+   no sudo) + data dirs (`/var/lib/signal-bot` mode `0700`, owned by
+   `signal-bot`).
 3. **Register Signal** interactively (manual, admin-driven):
    `signal-cli -a +14433996053 register` (with captcha if prompted) →
    receive the SMS/voice code on Google Voice →
