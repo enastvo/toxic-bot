@@ -21,6 +21,11 @@ pub struct Personality {
     #[serde(default = "def_top_p")] pub top_p: f32,
     #[serde(default = "def_ctx")] pub num_ctx: u32,
     pub proactive: ProactiveConfig,
+    #[serde(default)] pub num_predict: Option<i64>,
+    #[serde(default)] pub num_ctx_override: Option<u32>,
+    #[serde(default)] pub temperature_override: Option<f32>,
+    #[serde(default)] pub top_p_override: Option<f32>,
+    #[serde(default)] pub repeat_penalty: Option<f32>,
 }
 fn default_model() -> String { "qwen3:8b".into() }
 fn def_temp() -> f32 { 0.6 }
@@ -123,5 +128,16 @@ max_per_hour=5
         let p = Personalities::load_dir(d.path()).unwrap();
         assert!(p.get("broken").is_none());
         assert!(p.get("default").is_some());
+    }
+
+    #[test]
+    fn personality_optional_overrides_parse() {
+        let d = tempfile::tempdir().unwrap();
+        let body = "label=\"X\"\nsystem_prompt=\"hi\"\nmodel=\"qwen3:8b\"\ntemperature=0.5\ntop_p=0.9\nnum_ctx=8192\nnum_predict=800\nrepeat_penalty=1.5\n[proactive]\nrelevance_threshold=0.7\ncooldown_secs=60\nmax_per_hour=5\n";
+        std::fs::write(d.path().join("default.toml"), body).unwrap();
+        let p = Personalities::load_dir(d.path()).unwrap();
+        let d0 = p.get("default").unwrap();
+        assert_eq!(d0.num_predict, Some(800));
+        assert_eq!(d0.repeat_penalty, Some(1.5));
     }
 }
