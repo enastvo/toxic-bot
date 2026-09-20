@@ -93,6 +93,48 @@ pub(crate) fn turn_json(t: &ChatTurn) -> serde_json::Value {
     serde_json::json!({ "role": t.role.as_str(), "content": content })
 }
 
+/// Strip qwen3 thinking artifacts / control tokens from model output before it is
+/// stored or sent (prevents the /no_think self-reinforcement + echo loop).
+/// Preserves internal newlines and paragraph structure; only collapses horizontal
+/// whitespace within lines and removes excessive blank lines.
+pub fn sanitize(raw: &str) -> String {
+    // remove <think>...</think> (non-greedy, across newlines)
+    let mut s = String::with_capacity(raw.len());
+    let mut rest = raw;
+    loop {
+        match rest.find("<think>") {
+            Some(start) => {
+                s.push_str(&rest[..start]);
+                match rest[start..].find("</think>") {
+                    Some(end) => { rest = &rest[start + end + "</think>".len()..]; }
+                    None => { break; }
+                }
+            }
+            None => { s.push_str(rest); break; }
+        }
+    }
+
+    // Process line-by-line: collapse horizontal whitespace, filter tokens, preserve newlines
+    let lines: Vec<String> = s
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .filter(|tok| *tok != "/no_think" && *tok != "/think")
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+
+    let mut result = lines.join("\n");
+
+    // Collapse 3+ consecutive newlines to 2 (one blank line max)
+    while result.contains("\n\n\n") {
+        result = result.replace("\n\n\n", "\n\n");
+    }
+
+    result.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +155,35 @@ mod tests {
     fn junk_defaults_to_silent() {
         let r = parse_relevance("no idea");
         assert!(!r.should_reply); assert_eq!(r.confidence, 0.0);
+    }
+
+    #[test]
+    fn sanitize_strips_think_block() {
+        assert_eq!(sanitize("<think>reason</think>Hello"), "Hello");
+        assert_eq!(sanitize("a <think>x\ny</think> b"), "a b");
+    }
+
+    #[test]
+    fn sanitize_strips_control_tokens_whole_word_only() {
+        assert_eq!(sanitize("Dude you just said /no_think again"), "Dude you just said again");
+        assert_eq!(sanitize("/think then answer"), "then answer");
+        // must NOT touch a real word containing the substring
+        assert_eq!(sanitize("I think that rethink is fine"), "I think that rethink is fine");
+    }
+
+    #[test]
+    fn sanitize_trims() {
+        assert_eq!(sanitize("  hi  "), "hi");
+    }
+
+    #[test]
+    fn sanitize_preserves_paragraph_newlines() {
+        assert_eq!(sanitize("para one\npara two"), "para one\npara two");
+        assert_eq!(sanitize("line one\n\n\nline two"), "line one\n\nline two");
+    }
+
+    #[test]
+    fn sanitize_collapses_horizontal_runs_but_keeps_lines() {
+        assert_eq!(sanitize("a    b\nc\t\td"), "a b\nc d");
     }
 }
