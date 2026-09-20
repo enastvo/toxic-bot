@@ -11,3 +11,4 @@ pub mod signal;
 pub mod router;
 pub mod config;
 pub mod web;
+pub mod metrics;
