@@ -55,13 +55,40 @@ pub fn build_turns(window: &[StoredMessage], bot_id: &str) -> Vec<ChatTurn> {
     }).collect()
 }
 
-pub fn system_prompt(personality: &Personality, room: &Room) -> String {
+/// Shared conduct rules prepended to every personality's system prompt, so
+/// they live in one place and can't drift between personality TOML files.
+/// See design spec §10 "Personality-prompt rewrite".
+const HOUSE_RULES: &str = "\
+A useful, accurate answer is mandatory; persona flavor is optional and never a substitute \
+for one. Answer factual questions directly (you may stay in character while doing so). \
+Never use a stock template; never reuse a recent opener, closer, insult, or joke; never \
+start two replies the same way. Don't quote or paraphrase the whole message you're replying \
+to. Attribute correctly using the [Name] prefixes on messages; never put one person's words \
+in another's mouth. Match length: a short message in should get a short reply out, and not \
+every message deserves an insult. If someone makes a good joke, acknowledge it or fire back \
+rather than mechanically denying it. Don't \"correct\" a user's spelling, capitalization, or \
+emoji use when referring to their message. If asked for something impossible to do over \
+Signal (e.g. posting an image), say so briefly instead of pretending to do it.";
+
+/// The room-specific context line describing where the conversation is
+/// happening (group vs. direct message), inserted between the personality's
+/// voice and the speaker-label note.
+fn room_context_line(room: &Room) -> String {
     if room.is_group {
         let name = room.display_name.as_deref().unwrap_or("a group");
-        format!("{}\n\nYou are in a Signal group named \"{}\". Multiple people talk here; each user message is prefixed with the speaker's name.", personality.system_prompt.trim(), name)
+        format!("You are in a Signal group named \"{}\". Multiple people talk here; each user message is prefixed with the speaker's name.", name)
     } else {
-        personality.system_prompt.trim().to_string()
+        "You are in a direct message conversation with one person.".to_string()
     }
+}
+
+pub fn system_prompt(personality: &Personality, room: &Room) -> String {
+    format!(
+        "{HOUSE_RULES}\n\n{}\n\n{}\n{}",
+        personality.system_prompt.trim(),
+        room_context_line(room),
+        crate::context::speaker_note()
+    )
 }
 
 pub struct Router {
@@ -149,8 +176,9 @@ impl Router {
 
 #[cfg(test)]
 mod tests {
-    use super::{Decision, RateLimiter, decide, build_turns};
+    use super::{Decision, RateLimiter, decide, build_turns, system_prompt};
     use crate::types::{Room, ReplyMode, IncomingMessage, StoredMessage, Role};
+    use crate::personalities::{Personality, ProactiveConfig};
 
     fn room(mode: ReplyMode, is_group: bool) -> Room {
         Room { room_id: "r".into(), display_name: None, is_group, personality: None, reply_mode: mode }
@@ -197,6 +225,31 @@ mod tests {
     fn proactive_mode_replies_when_addressed() {
         // A direct mention in proactive mode is a guaranteed reply, not gated.
         assert!(matches!(decide(&room(ReplyMode::Proactive, true), &msg(true, true)), Decision::Reply));
+    }
+
+    #[test]
+    fn system_prompt_includes_house_rules_and_speaker_note() {
+        let p = Personality {
+            name: "sage".into(),
+            label: "Sage".into(),
+            description: None,
+            system_prompt: "You are Sage.".into(),
+            model: "qwen3:8b".into(),
+            temperature: 0.6,
+            top_p: 0.9,
+            num_ctx: 8192,
+            proactive: ProactiveConfig { relevance_threshold: 0.5, cooldown_secs: 60, max_per_hour: 4 },
+            num_predict: None,
+            num_ctx_override: None,
+            temperature_override: None,
+            top_p_override: None,
+            repeat_penalty: None,
+        };
+        let r = room(ReplyMode::Addressed, true);
+        let s = system_prompt(&p, &r);
+        assert!(s.contains("useful") && s.contains("mandatory")); // answer-mandatory rule
+        assert!(s.contains("square brackets")); // speaker note
+        assert!(s.contains("You are Sage.")); // character preserved
     }
 
     #[test]
