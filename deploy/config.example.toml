@@ -1,0 +1,14 @@
+data_dir = "/var/lib/signal-bot"
+personalities_dir = "/etc/signal-bot/personalities"
+signal_bin = "/usr/local/bin/signal-cli"
+signal_account = "+14433996053"
+ollama_url = "http://127.0.0.1:11434"
+# 0.0.0.0 listens on ALL network interfaces, not just the LAN -- a home box's LAN
+# IP is often DHCP-assigned, so binding to a fixed address isn't always practical.
+# You MUST firewall port 8443 to LAN-only access (e.g. ufw/iptables rule scoped to
+# your LAN subnet), or set this to a specific LAN IP instead of 0.0.0.0.
+bind_addr = "0.0.0.0:8443"
+cert_path = "/etc/signal-bot/tls/bot.local.crt"
+key_path  = "/etc/signal-bot/tls/bot.local.key"
+debug = false
+dry_run = false
