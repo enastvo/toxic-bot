@@ -21,16 +21,19 @@ pub fn parse_relevance(s: &str) -> Relevance {
     Relevance { should_reply: false, confidence: 0.0 }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GenStats { pub prompt_tokens: u32, pub reply_tokens: u32, pub total_ms: u64, pub eval_ms: u64 }
+
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
-    async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<String>;
+    async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<(String, GenStats)>;
     async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>) -> anyhow::Result<Relevance>;
 }
 
 pub struct MockLlm { pub reply: String, pub relevance: Relevance }
 #[async_trait]
 impl LlmBackend for MockLlm {
-    async fn generate_reply(&self, _req: ChatRequest) -> anyhow::Result<String> { Ok(self.reply.clone()) }
+    async fn generate_reply(&self, _req: ChatRequest) -> anyhow::Result<(String, GenStats)> { Ok((self.reply.clone(), GenStats::default())) }
     async fn relevance_check(&self, _m: &str, _c: u32, _t: Vec<ChatTurn>) -> anyhow::Result<Relevance> { Ok(self.relevance) }
 }
 
@@ -60,6 +63,23 @@ impl OllamaClient {
         let v: serde_json::Value = resp.json().await?;
         Ok(v["message"]["content"].as_str().unwrap_or_default().trim().to_string())
     }
+
+    async fn chat_with_stats(&self, model: &str, msgs: Vec<serde_json::Value>, opts: serde_json::Value)
+        -> anyhow::Result<(String, GenStats)>
+    {
+        let body = serde_json::json!({ "model": model, "messages": msgs, "stream": false, "think": false, "options": opts });
+        let resp = self.http.post(format!("{}/api/chat", self.base_url))
+            .json(&body).send().await?.error_for_status()?;
+        let v: serde_json::Value = resp.json().await?;
+        let content = v["message"]["content"].as_str().unwrap_or_default().trim();
+        let stats = GenStats {
+            prompt_tokens: v["prompt_eval_count"].as_u64().unwrap_or(0) as u32,
+            reply_tokens: v["eval_count"].as_u64().unwrap_or(0) as u32,
+            total_ms: v["total_duration"].as_u64().unwrap_or(0) / 1_000_000,
+            eval_ms: v["eval_duration"].as_u64().unwrap_or(0) / 1_000_000,
+        };
+        Ok((sanitize(content), stats))
+    }
 }
 
 const RELEVANCE_SYS: &str = "You decide whether the assistant should chime in UNPROMPTED to a group chat. \
@@ -68,11 +88,11 @@ Set should_reply true only if the assistant can add clear value right now.";
 
 #[async_trait]
 impl LlmBackend for OllamaClient {
-    async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<String> {
+    async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<(String, GenStats)> {
         let mut msgs = vec![serde_json::json!({"role":"system","content": req.system})];
         msgs.extend(req.turns.iter().map(turn_json));
         let opts = serde_json::json!({"temperature": req.temperature, "top_p": req.top_p, "num_ctx": req.num_ctx});
-        self.chat(&req.model, msgs, opts).await
+        self.chat_with_stats(&req.model, msgs, opts).await
     }
 
     async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>) -> anyhow::Result<Relevance> {

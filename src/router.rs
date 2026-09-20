@@ -116,7 +116,7 @@ impl Router {
             }
         }
 
-        let reply = self.llm.generate_reply(ChatRequest {
+        let (reply, _stats) = self.llm.generate_reply(ChatRequest {
             model: personality.model.clone(),
             system: system_prompt(&personality, &room),
             turns,
