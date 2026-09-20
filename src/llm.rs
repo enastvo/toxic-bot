@@ -6,6 +6,41 @@ use serde::Deserialize;
 pub struct ChatRequest {
     pub model: String, pub system: String, pub turns: Vec<ChatTurn>,
     pub temperature: f32, pub top_p: f32, pub num_ctx: u32,
+    pub repeat_penalty: f64, pub repeat_last_n: u32, pub num_predict: i32, pub keep_alive: String,
+}
+
+/// Build the `/api/chat` request body. `think: false` disables reasoning output on
+/// thinking models (e.g. qwen3). Without it, qwen3 spends its token budget on
+/// <think> and returns no visible content — which breaks the relevance-check JSON
+/// and pollutes replies with reasoning traces (also much slower on CPU). All
+/// current personalities use qwen3; Ollama ignores this for models that don't think.
+pub(crate) fn build_chat_body(model: &str, msgs: &[serde_json::Value], opts_extra: &ChatRequest) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "messages": msgs,
+        "stream": false,
+        "think": false,
+        "keep_alive": opts_extra.keep_alive,
+        "options": {
+            "temperature": opts_extra.temperature,
+            "top_p": opts_extra.top_p,
+            "num_ctx": opts_extra.num_ctx,
+            "repeat_penalty": opts_extra.repeat_penalty,
+            "repeat_last_n": opts_extra.repeat_last_n,
+            "num_predict": opts_extra.num_predict,
+        }
+    })
+}
+
+/// Map an Ollama `/api/chat` JSON response into `GenStats`. Missing fields default
+/// to 0; never panics on malformed/partial input.
+pub(crate) fn parse_gen_stats(v: &serde_json::Value) -> GenStats {
+    GenStats {
+        prompt_tokens: v["prompt_eval_count"].as_u64().unwrap_or(0) as u32,
+        reply_tokens: v["eval_count"].as_u64().unwrap_or(0) as u32,
+        total_ms: v["total_duration"].as_u64().unwrap_or(0) / 1_000_000,
+        eval_ms: v["eval_duration"].as_u64().unwrap_or(0) / 1_000_000,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -49,35 +84,15 @@ impl OllamaClient {
         }
     }
 
-    async fn chat(&self, model: &str, msgs: Vec<serde_json::Value>, opts: serde_json::Value)
-        -> anyhow::Result<String>
-    {
-        // `think: false` disables reasoning output on thinking models (e.g. qwen3).
-        // Without it, qwen3 spends its token budget on <think> and returns no visible
-        // content — which breaks the relevance-check JSON and pollutes replies with
-        // reasoning traces (also much slower on CPU). All current personalities use
-        // qwen3; Ollama ignores this for models that don't think.
-        let body = serde_json::json!({ "model": model, "messages": msgs, "stream": false, "think": false, "options": opts });
-        let resp = self.http.post(format!("{}/api/chat", self.base_url))
-            .json(&body).send().await?.error_for_status()?;
-        let v: serde_json::Value = resp.json().await?;
-        Ok(v["message"]["content"].as_str().unwrap_or_default().trim().to_string())
-    }
-
-    async fn chat_with_stats(&self, model: &str, msgs: Vec<serde_json::Value>, opts: serde_json::Value)
+    async fn chat_with_stats(&self, model: &str, msgs: Vec<serde_json::Value>, opts_extra: &ChatRequest)
         -> anyhow::Result<(String, GenStats)>
     {
-        let body = serde_json::json!({ "model": model, "messages": msgs, "stream": false, "think": false, "options": opts });
+        let body = build_chat_body(model, &msgs, opts_extra);
         let resp = self.http.post(format!("{}/api/chat", self.base_url))
             .json(&body).send().await?.error_for_status()?;
         let v: serde_json::Value = resp.json().await?;
         let content = v["message"]["content"].as_str().unwrap_or_default().trim();
-        let stats = GenStats {
-            prompt_tokens: v["prompt_eval_count"].as_u64().unwrap_or(0) as u32,
-            reply_tokens: v["eval_count"].as_u64().unwrap_or(0) as u32,
-            total_ms: v["total_duration"].as_u64().unwrap_or(0) / 1_000_000,
-            eval_ms: v["eval_duration"].as_u64().unwrap_or(0) / 1_000_000,
-        };
+        let stats = parse_gen_stats(&v);
         Ok((sanitize(content), stats))
     }
 }
@@ -91,16 +106,23 @@ impl LlmBackend for OllamaClient {
     async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<(String, GenStats)> {
         let mut msgs = vec![serde_json::json!({"role":"system","content": req.system})];
         msgs.extend(req.turns.iter().map(turn_json));
-        let opts = serde_json::json!({"temperature": req.temperature, "top_p": req.top_p, "num_ctx": req.num_ctx});
-        self.chat_with_stats(&req.model, msgs, opts).await
+        self.chat_with_stats(&req.model, msgs, &req).await
     }
 
     async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>) -> anyhow::Result<Relevance> {
         let mut msgs = vec![serde_json::json!({"role":"system","content": RELEVANCE_SYS})];
         msgs.extend(turns.iter().map(turn_json));
-        let opts = serde_json::json!({"temperature": 0.0, "num_ctx": num_ctx, "num_predict": 40});
-        let raw = self.chat(model, msgs, opts).await?;
-        Ok(parse_relevance(&raw))
+        // small, dedicated body: fast/deterministic relevance gating, not routed through
+        // build_chat_body since it doesn't carry a full ChatRequest's knobs.
+        let body = serde_json::json!({
+            "model": model, "messages": msgs, "stream": false, "think": false,
+            "options": {"temperature": 0.0, "num_ctx": num_ctx, "num_predict": 40}
+        });
+        let resp = self.http.post(format!("{}/api/chat", self.base_url))
+            .json(&body).send().await?.error_for_status()?;
+        let v: serde_json::Value = resp.json().await?;
+        let raw = v["message"]["content"].as_str().unwrap_or_default().trim();
+        Ok(parse_relevance(raw))
     }
 }
 
@@ -205,5 +227,30 @@ mod tests {
     #[test]
     fn sanitize_collapses_horizontal_runs_but_keeps_lines() {
         assert_eq!(sanitize("a    b\nc\t\td"), "a b\nc d");
+    }
+
+    #[test]
+    fn chat_body_has_think_false_and_knobs() {
+        let req = ChatRequest { model:"qwen3:8b".into(), system:"s".into(), turns:vec![],
+            temperature:0.7, top_p:0.9, num_ctx:8192, repeat_penalty:1.3, repeat_last_n:256,
+            num_predict:512, keep_alive:"30m".into() };
+        let msgs = vec![serde_json::json!({"role":"system","content":"s"})];
+        let body = build_chat_body(&req.model, &msgs, &req);
+        assert_eq!(body["think"], serde_json::json!(false));
+        assert_eq!(body["keep_alive"], serde_json::json!("30m"));
+        assert_eq!(body["options"]["num_predict"], serde_json::json!(512));
+        assert_eq!(body["options"]["repeat_penalty"], serde_json::json!(1.3));
+        assert_eq!(body["options"]["repeat_last_n"], serde_json::json!(256));
+        assert_eq!(body["stream"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn parse_gen_stats_maps_ollama_fields() {
+        let v = serde_json::json!({"message":{"content":"hi"},"prompt_eval_count":123,"eval_count":45,"total_duration":2_000_000_000u64,"eval_duration":1_500_000_000u64});
+        let s = parse_gen_stats(&v);
+        assert_eq!(s.prompt_tokens, 123);
+        assert_eq!(s.reply_tokens, 45);
+        assert_eq!(s.total_ms, 2000);
+        assert_eq!(s.eval_ms, 1500);
     }
 }

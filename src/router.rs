@@ -123,6 +123,11 @@ impl Router {
             temperature: personality.temperature,
             top_p: personality.top_p,
             num_ctx: personality.num_ctx,
+            // TODO(Task 10): source from resolved EffectiveParams instead of constants.
+            keep_alive: "30m".into(),
+            repeat_penalty: 1.3,
+            repeat_last_n: 256,
+            num_predict: 512,
         }).await?;
 
         if reply.trim().is_empty() { return Ok(None); }
