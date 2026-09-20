@@ -1,4 +1,4 @@
-use crate::types::{ChatTurn, Role};
+use crate::types::ChatTurn;
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -129,8 +129,8 @@ impl LlmBackend for OllamaClient {
 // helper used by both real client and prompt building
 pub(crate) fn turn_json(t: &ChatTurn) -> serde_json::Value {
     let content = match &t.name {
-        Some(n) if t.role == Role::User => format!("{n}: {}", t.content),
-        _ => t.content.clone(),
+        Some(n) => format!("{n}: {}", t.content),
+        None => t.content.clone(),
     };
     serde_json::json!({ "role": t.role.as_str(), "content": content })
 }

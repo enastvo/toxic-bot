@@ -1,4 +1,5 @@
 pub mod types;
+pub mod context;
 pub mod window;
 pub mod store;
 pub mod personalities;
