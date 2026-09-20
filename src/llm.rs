@@ -49,7 +49,12 @@ impl OllamaClient {
     async fn chat(&self, model: &str, msgs: Vec<serde_json::Value>, opts: serde_json::Value)
         -> anyhow::Result<String>
     {
-        let body = serde_json::json!({ "model": model, "messages": msgs, "stream": false, "options": opts });
+        // `think: false` disables reasoning output on thinking models (e.g. qwen3).
+        // Without it, qwen3 spends its token budget on <think> and returns no visible
+        // content — which breaks the relevance-check JSON and pollutes replies with
+        // reasoning traces (also much slower on CPU). All current personalities use
+        // qwen3; Ollama ignores this for models that don't think.
+        let body = serde_json::json!({ "model": model, "messages": msgs, "stream": false, "think": false, "options": opts });
         let resp = self.http.post(format!("{}/api/chat", self.base_url))
             .json(&body).send().await?.error_for_status()?;
         let v: serde_json::Value = resp.json().await?;

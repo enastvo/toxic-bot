@@ -15,7 +15,15 @@ pub fn decide(room: &Room, msg: &IncomingMessage) -> Decision {
     match room.reply_mode {
         ReplyMode::Always => Decision::Reply,
         ReplyMode::Addressed => if msg.is_mention || msg.quoted_msg.is_some() { Decision::Reply } else { Decision::Silent },
-        ReplyMode::Proactive => Decision::Proactive,
+        // Proactive: always reply when directly addressed (mention/quote), and
+        // otherwise defer to the relevance gate to decide whether to chime in.
+        ReplyMode::Proactive => {
+            if msg.is_mention || msg.quoted_msg.is_some() {
+                Decision::Reply
+            } else {
+                Decision::Proactive
+            }
+        }
     }
 }
 
@@ -177,7 +185,13 @@ mod tests {
     }
     #[test]
     fn proactive_mode_defers_to_gate() {
+        // Unaddressed group message in proactive mode -> relevance gate.
         assert!(matches!(decide(&room(ReplyMode::Proactive, true), &msg(true, false)), Decision::Proactive));
+    }
+    #[test]
+    fn proactive_mode_replies_when_addressed() {
+        // A direct mention in proactive mode is a guaranteed reply, not gated.
+        assert!(matches!(decide(&room(ReplyMode::Proactive, true), &msg(true, true)), Decision::Reply));
     }
 
     #[test]
