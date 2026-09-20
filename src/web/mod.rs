@@ -69,6 +69,22 @@ pub fn build_router(state: AppState) -> Router {
         .layer(session_layer)
 }
 
+/// Build the rustls TLS config from a PEM cert/key pair, installing the process
+/// crypto provider first.
+///
+/// rustls 0.23 requires a process-level `CryptoProvider` to be installed before any
+/// TLS config is built. Both aws-lc-rs (via axum-server) and ring (via rcgen) are in
+/// the dependency tree, so rustls cannot auto-select one — we install aws-lc-rs
+/// explicitly. The install is idempotent: a second call (e.g. on the supervised retry
+/// loop) returns an error we deliberately ignore.
+pub async fn load_tls_config(
+    cert: &Path,
+    key: &Path,
+) -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    Ok(axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?)
+}
+
 /// Serve the dashboard over HTTPS using the given PEM cert/key pair.
 pub async fn serve_tls(
     state: AppState,
@@ -76,7 +92,7 @@ pub async fn serve_tls(
     cert: &Path,
     key: &Path,
 ) -> anyhow::Result<()> {
-    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+    let config = load_tls_config(cert, key).await?;
     let addr: SocketAddr = bind.parse()?;
     let app = build_router(state);
     axum_server::bind_rustls(addr, config)
