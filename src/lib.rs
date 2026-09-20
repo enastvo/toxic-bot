@@ -4,6 +4,7 @@ pub mod store;
 pub mod personalities;
 pub mod personalities_watch;
 pub mod repl;
+pub mod settings;
 pub mod llm;
 pub mod signal;
 pub mod router;
