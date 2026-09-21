@@ -191,7 +191,7 @@ impl Router {
         let turns = crate::context::build_context_turns(&recent, &self.bot_id);
 
         if decision == Decision::Proactive {
-            let rel = self.llm.relevance_check(&personality.model, eff.num_ctx, turns.clone()).await?;
+            let rel = self.llm.relevance_check(&personality.model, eff.num_ctx, turns.clone(), settings.ollama_timeout_secs.max(1) as u64).await?;
             tracing::debug!(room=%room.room_id, should=rel.should_reply, conf=rel.confidence, thr=personality.proactive.relevance_threshold, "relevance");
             if !rel.should_reply || rel.confidence < personality.proactive.relevance_threshold {
                 self.metrics.record(TurnRecord {
@@ -224,6 +224,7 @@ impl Router {
             repeat_last_n: eff.repeat_last_n,
             num_predict: eff.num_predict,
             keep_alive: eff.keep_alive.clone(),
+            ollama_timeout_secs: settings.ollama_timeout_secs.max(1) as u64,
         }).await;
 
         let (reply, stats) = match gen {

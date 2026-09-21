@@ -19,9 +19,14 @@ pub struct Personality {
     #[serde(default = "default_model")] pub model: String,
     #[serde(default = "def_temp")] pub temperature: f32,
     #[serde(default = "def_top_p")] pub top_p: f32,
+    /// Legacy context size, retained for back-compat. NOT consulted for
+    /// generation — `settings::resolve` reads `num_ctx_override` (falling back to
+    /// the global setting) instead. See `num_ctx_override`.
     #[serde(default = "def_ctx")] pub num_ctx: u32,
     pub proactive: ProactiveConfig,
     #[serde(default)] pub num_predict: Option<i64>,
+    /// The per-personality context-size override actually used for generation
+    /// (via `settings::resolve`); `None` falls back to the global `num_ctx`.
     #[serde(default)] pub num_ctx_override: Option<u32>,
     #[serde(default)] pub temperature_override: Option<f32>,
     #[serde(default)] pub top_p_override: Option<f32>,

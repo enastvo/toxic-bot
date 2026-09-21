@@ -7,6 +7,10 @@ pub struct ChatRequest {
     pub model: String, pub system: String, pub turns: Vec<ChatTurn>,
     pub temperature: f32, pub top_p: f32, pub num_ctx: u32,
     pub repeat_penalty: f64, pub repeat_last_n: u32, pub num_predict: i32, pub keep_alive: String,
+    /// Per-request generation timeout (seconds). Applied on the reqwest builder for
+    /// this request so an edit in the web UI takes effect immediately (the client's
+    /// construction-time timeout is only a safety fallback).
+    pub ollama_timeout_secs: u64,
 }
 
 /// Build the `/api/chat` request body. `think: false` disables reasoning output on
@@ -62,16 +66,16 @@ pub struct GenStats { pub prompt_tokens: u32, pub reply_tokens: u32, pub total_m
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
     async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<(String, GenStats)>;
-    async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>) -> anyhow::Result<Relevance>;
-    async fn summarize(&self, model: &str, prior: &str, transcript: &str) -> anyhow::Result<String>;
+    async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>, timeout_secs: u64) -> anyhow::Result<Relevance>;
+    async fn summarize(&self, model: &str, prior: &str, transcript: &str, timeout_secs: u64) -> anyhow::Result<String>;
 }
 
 pub struct MockLlm { pub reply: String, pub relevance: Relevance }
 #[async_trait]
 impl LlmBackend for MockLlm {
     async fn generate_reply(&self, _req: ChatRequest) -> anyhow::Result<(String, GenStats)> { Ok((self.reply.clone(), GenStats::default())) }
-    async fn relevance_check(&self, _m: &str, _c: u32, _t: Vec<ChatTurn>) -> anyhow::Result<Relevance> { Ok(self.relevance) }
-    async fn summarize(&self, _model: &str, _prior: &str, _transcript: &str) -> anyhow::Result<String> { Ok("[mock summary]".to_string()) }
+    async fn relevance_check(&self, _m: &str, _c: u32, _t: Vec<ChatTurn>, _timeout_secs: u64) -> anyhow::Result<Relevance> { Ok(self.relevance) }
+    async fn summarize(&self, _model: &str, _prior: &str, _transcript: &str, _timeout_secs: u64) -> anyhow::Result<String> { Ok("[mock summary]".to_string()) }
 }
 
 /// A model reported as currently loaded by Ollama's `/api/ps`.
@@ -122,6 +126,7 @@ impl OllamaClient {
     {
         let body = build_chat_body(model, &msgs, opts_extra);
         let resp = self.http.post(format!("{}/api/chat", self.base_url))
+            .timeout(std::time::Duration::from_secs(opts_extra.ollama_timeout_secs.max(1)))
             .json(&body).send().await?.error_for_status()?;
         let v: serde_json::Value = resp.json().await?;
         let content = v["message"]["content"].as_str().unwrap_or_default().trim();
@@ -164,23 +169,26 @@ impl LlmBackend for OllamaClient {
         self.chat_with_stats(&req.model, msgs, &req).await
     }
 
-    async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>) -> anyhow::Result<Relevance> {
+    async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>, timeout_secs: u64) -> anyhow::Result<Relevance> {
         let mut msgs = vec![serde_json::json!({"role":"system","content": RELEVANCE_SYS})];
         msgs.extend(turns.iter().map(turn_json));
         // small, dedicated body: fast/deterministic relevance gating, not routed through
-        // build_chat_body since it doesn't carry a full ChatRequest's knobs.
+        // build_chat_body since it doesn't carry a full ChatRequest's knobs. keep_alive
+        // matches the default so the relevance gate also keeps the model resident.
         let body = serde_json::json!({
             "model": model, "messages": msgs, "stream": false, "think": false,
+            "keep_alive": "30m",
             "options": {"temperature": 0.0, "num_ctx": num_ctx, "num_predict": 40}
         });
         let resp = self.http.post(format!("{}/api/chat", self.base_url))
+            .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
             .json(&body).send().await?.error_for_status()?;
         let v: serde_json::Value = resp.json().await?;
         let raw = v["message"]["content"].as_str().unwrap_or_default().trim();
         Ok(parse_relevance(raw))
     }
 
-    async fn summarize(&self, model: &str, prior: &str, transcript: &str) -> anyhow::Result<String> {
+    async fn summarize(&self, model: &str, prior: &str, transcript: &str, timeout_secs: u64) -> anyhow::Result<String> {
         let user_content = format!("Prior summary:\n{prior}\n\nNew messages:\n{transcript}");
         let msgs = vec![
             serde_json::json!({"role":"system","content": SUMMARY_SYS}),
@@ -190,9 +198,11 @@ impl LlmBackend for OllamaClient {
             model: model.to_string(), system: SUMMARY_SYS.to_string(), turns: vec![],
             temperature: 0.3, top_p: 0.9, num_ctx: 8192,
             repeat_penalty: 1.3, repeat_last_n: 256, num_predict: 300, keep_alive: "30m".to_string(),
+            ollama_timeout_secs: timeout_secs.max(1),
         };
         let body = build_chat_body(model, &msgs, &req);
         let resp = self.http.post(format!("{}/api/chat", self.base_url))
+            .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
             .json(&body).send().await?.error_for_status()?;
         let v: serde_json::Value = resp.json().await?;
         let content = v["message"]["content"].as_str().unwrap_or_default().trim();
@@ -307,7 +317,7 @@ mod tests {
     fn chat_body_has_think_false_and_knobs() {
         let req = ChatRequest { model:"qwen3:8b".into(), system:"s".into(), turns:vec![],
             temperature:0.7, top_p:0.9, num_ctx:8192, repeat_penalty:1.3, repeat_last_n:256,
-            num_predict:512, keep_alive:"30m".into() };
+            num_predict:512, keep_alive:"30m".into(), ollama_timeout_secs:300 };
         let msgs = vec![serde_json::json!({"role":"system","content":"s"})];
         let body = build_chat_body(&req.model, &msgs, &req);
         assert_eq!(body["think"], serde_json::json!(false));

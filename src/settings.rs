@@ -23,7 +23,36 @@ pub fn resolve(global: &SettingsRow, p: &Personality) -> EffectiveParams {
     }
 }
 
+/// Validate the `keep_alive` value passed through to Ollama. Accepts either a
+/// plain integer number of seconds (including `-1` = keep forever, `0` = unload
+/// immediately) or `<digits><unit>` where unit is one of `ms`, `s`, `m`, `h`
+/// (e.g. `"30m"`, `"1h"`, `"500ms"`). A bad value must not brick the bot (§13).
+fn keep_alive_is_valid(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() || t != s {
+        return false;
+    }
+    // plain integer (optionally negative)
+    if t.parse::<i64>().is_ok() {
+        return true;
+    }
+    // <digits><unit>
+    for unit in ["ms", "s", "m", "h"] {
+        if let Some(num) = t.strip_suffix(unit) {
+            return !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit());
+        }
+    }
+    false
+}
+
 pub fn validate(row: &SettingsRow) -> Result<(), String> {
+    if !keep_alive_is_valid(&row.keep_alive) {
+        return Err(format!(
+            "keep_alive must be an integer of seconds (e.g. \"0\", \"-1\") or <number><unit> \
+             with unit ms/s/m/h (e.g. \"30m\", \"1h\"), got {:?}",
+            row.keep_alive
+        ));
+    }
     if !(10..=600).contains(&row.ollama_timeout_secs) {
         return Err(format!(
             "ollama_timeout_secs must be between 10 and 600, got {}",
@@ -116,6 +145,23 @@ mod tests {
         assert_eq!(e.num_predict, 800);
         assert_eq!(e.repeat_penalty, 1.5);
         assert_eq!(e.num_ctx, 8192); // not overridden -> global
+    }
+
+    #[test]
+    fn validate_keep_alive_format() {
+        let mut g = global();
+        // valid forms
+        for v in ["30m", "1h", "0", "-1", "500ms", "45s", "12"] {
+            g.keep_alive = v.into();
+            assert!(validate(&g).is_ok(), "expected {v} to be valid");
+        }
+        // garbage / empty
+        for v in ["banana", "", "   ", "30x", "m30", "1.5h", "30 m"] {
+            g.keep_alive = v.into();
+            let r = validate(&g);
+            assert!(r.is_err(), "expected {v} to be rejected");
+            assert!(r.unwrap_err().contains("keep_alive"));
+        }
     }
 
     #[test]

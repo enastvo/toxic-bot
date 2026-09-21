@@ -33,6 +33,14 @@ pub async fn run_sweep_once(
     permit: &Arc<Semaphore>,
 ) -> anyhow::Result<usize> {
     let mut count = 0usize;
+    // Per-request timeout for summarization, read from live settings so a web-UI
+    // edit applies without restart. Fall back to a sane default if settings are
+    // unreadable — a bad read must not kill the sweep.
+    let timeout_secs = store
+        .get_settings()
+        .await
+        .map(|s| s.ollama_timeout_secs.max(1) as u64)
+        .unwrap_or(300);
     for room in store.rooms_with_new_messages_since_summary().await? {
         let prior = store.get_summary(&room).await?;
         let covered_through_ts = prior.as_ref().map(|s| s.covered_through_ts).unwrap_or(0);
@@ -56,8 +64,13 @@ pub async fn run_sweep_once(
         }
 
         let new_summary = {
+            // Accepted behavior: the global inference permit guarantees a summary
+            // never overlaps live reply generation. A live reply can therefore
+            // briefly wait behind an in-flight summary (bounded by the summary's
+            // num_predict:300). True preemption of a summary by a live reply is a
+            // known fast-follow, not implemented here.
             let _permit = permit.acquire().await?;
-            llm.summarize(model, &prior_summary, &transcript).await?
+            llm.summarize(model, &prior_summary, &transcript, timeout_secs).await?
         };
 
         store.upsert_summary(&room, &new_summary, new_covered_through_ts).await?;
