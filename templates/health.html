@@ -1,5 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Health{% endblock %}
+{% block nav %}
+<a href="/">Rooms</a>
+<a href="/health" class="active">Health</a>
+<a href="/settings">Settings</a>
+{% endblock %}
 {% block content %}
 <p><a href="/">&larr; Rooms</a></p>
 <h1>Health</h1>

@@ -1,5 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Rooms{% endblock %}
+{% block nav %}
+<a href="/" class="active">Rooms</a>
+<a href="/health">Health</a>
+<a href="/settings">Settings</a>
+{% endblock %}
 {% block content %}
 <h1>Rooms</h1>
 {% if rooms.is_empty() %}

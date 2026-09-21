@@ -22,6 +22,17 @@
     align-items: center;
   }
   header a.brand { color: #e6e6e6; text-decoration: none; font-weight: 600; }
+  .header-left { display: flex; align-items: center; }
+  .nav { display: flex; gap: 1.25rem; margin-left: 1.75rem; }
+  .nav a {
+    color: #9aa4af;
+    text-decoration: none;
+    font-size: 0.9rem;
+    padding: 0.25rem 0.1rem;
+    border-bottom: 2px solid transparent;
+  }
+  .nav a:hover { color: #e6e6e6; }
+  .nav a.active { color: #7fb0ff; border-bottom-color: #7fb0ff; }
   main { padding: 1.5rem; max-width: 960px; margin: 0 auto; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #262b31; }
@@ -54,7 +65,10 @@
 </head>
 <body>
 <header>
-  <a class="brand" href="/">Signal Bot</a>
+  <div class="header-left">
+    <a class="brand" href="/">Signal Bot</a>
+    <nav class="nav">{% block nav %}{% endblock %}</nav>
+  </div>
   <form method="post" action="/logout"><button type="submit">Log out</button></form>
 </header>
 <main>
