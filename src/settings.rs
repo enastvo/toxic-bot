@@ -95,6 +95,9 @@ pub fn validate(row: &SettingsRow) -> Result<(), String> {
             row.summary_interval_hours
         ));
     }
+    if !(0..=5).contains(&row.max_tool_rounds) {
+        return Err(format!("max_tool_rounds must be between 0 and 5, got {}", row.max_tool_rounds));
+    }
     Ok(())
 }
 
@@ -116,6 +119,10 @@ mod tests {
             default_top_p: 0.9,
             summary_enabled: true,
             summary_interval_hours: 6,
+            tools_enabled: false,
+            web_search_enabled: false,
+            search_whitelist: "wikipedia.org".into(),
+            max_tool_rounds: 2,
         }
     }
 

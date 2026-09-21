@@ -32,6 +32,10 @@ async fn seed_settings(store: &Store) {
             default_top_p: 0.9,
             summary_enabled: true,
             summary_interval_hours: 6,
+            tools_enabled: false,
+            web_search_enabled: false,
+            search_whitelist: "wikipedia.org".into(),
+            max_tool_rounds: 2,
         })
         .await
         .unwrap();
@@ -48,7 +52,7 @@ async fn direct_message_gets_reply_and_is_sent() {
     seed_settings(&store).await;
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "hi there".into(), relevance: Relevance{should_reply:false, confidence:0.0} });
-    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None);
+    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None, None);
 
     let out = r.handle(incoming("+1000", false, false)).await.unwrap();
     assert_eq!(out.as_deref(), Some("hi there"));
@@ -63,7 +67,7 @@ async fn group_addressed_silent_without_mention() {
     seed_settings(&store).await;
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "x".into(), relevance: Relevance{should_reply:true, confidence:1.0} });
-    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None);
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None, None);
     let out = r.handle(incoming("G", true, false)).await.unwrap();
     assert!(out.is_none());
     assert!(sig.sent.lock().unwrap().is_empty());
@@ -77,7 +81,7 @@ async fn proactive_below_threshold_stays_silent() {
     store.set_reply_mode("G", ReplyMode::Proactive).await.unwrap();
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "x".into(), relevance: Relevance{should_reply:true, confidence:0.5} });
-    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None);
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None, None);
     let out = r.handle(incoming("G", true, false)).await.unwrap();
     assert!(out.is_none()); // 0.5 < 0.7 threshold
     assert!(sig.sent.lock().unwrap().is_empty());
@@ -91,7 +95,7 @@ async fn dry_run_proactive_does_not_consume_rate_limit() {
     store.set_reply_mode("G", ReplyMode::Proactive).await.unwrap();
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "would say".into(), relevance: Relevance{should_reply:true, confidence:1.0} });
-    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), true, Metrics::new(), None);
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), true, Metrics::new(), None, None);
 
     let out1 = r.handle(incoming("G", true, false)).await.unwrap();
     let out2 = r.handle(incoming("G", true, false)).await.unwrap();
@@ -109,7 +113,7 @@ async fn self_sent_message_is_ignored() {
     seed_settings(&store).await;
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "should not be used".into(), relevance: Relevance{should_reply:true, confidence:1.0} });
-    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None);
+    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None, None);
 
     let mut msg = incoming("+1000", false, false);
     msg.sender_id = "+bot".into();
@@ -127,7 +131,7 @@ async fn dry_run_produces_reply_but_does_not_send() {
     seed_settings(&store).await;
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "would say".into(), relevance: Relevance{should_reply:false, confidence:0.0} });
-    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), true, Metrics::new(), None);
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), true, Metrics::new(), None, None);
     let out = r.handle(incoming("+1000", false, false)).await.unwrap();
     assert_eq!(out.as_deref(), Some("would say"));
     assert!(sig.sent.lock().unwrap().is_empty());
@@ -140,7 +144,7 @@ async fn direct_reply_records_one_metrics_reply() {
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "hi there".into(), relevance: Relevance{should_reply:false, confidence:0.0} });
     let metrics = Metrics::new();
-    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, metrics.clone(), None);
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, metrics.clone(), None, None);
 
     let out = r.handle(incoming("+1000", false, false)).await.unwrap();
     assert_eq!(out.as_deref(), Some("hi there"));
@@ -154,7 +158,7 @@ async fn dm_reply_publishes_bot_sse_event() {
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "hi there".into(), relevance: Relevance{should_reply:false, confidence:0.0} });
     let (tx, mut rx) = tokio::sync::broadcast::channel(16);
-    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), Some(tx));
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), Some(tx), None);
 
     let out = r.handle(incoming("+1000", false, false)).await.unwrap();
     assert_eq!(out.as_deref(), Some("hi there"));

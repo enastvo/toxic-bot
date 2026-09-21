@@ -99,6 +99,19 @@ async fn main() -> anyhow::Result<()> {
         &cfg.data_dir,
     )
     .await?;
+    // Web-search provider (Tavily). Built only when an API key is configured
+    // (secret, from config.toml). Absent key => web search unavailable.
+    let search: Option<Arc<dyn signal_bot::search::SearchProvider>> = cfg
+        .search_api_key
+        .clone()
+        .filter(|k| !k.trim().is_empty())
+        .map(|key| {
+            Arc::new(signal_bot::search::TavilyClient::new(key, 20))
+                as Arc<dyn signal_bot::search::SearchProvider>
+        });
+    if search.is_some() {
+        tracing::info!("web-search provider configured (Tavily)");
+    }
     let router = Arc::new(Router::new(
         store.clone(),
         personalities.clone(),
@@ -108,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
         dry_run,
         metrics.clone(),
         Some(state.tx.clone()),
+        search,
     ));
     let dispatcher = Dispatcher::new(router);
     let _ = dispatcher_cell.set(dispatcher.clone());

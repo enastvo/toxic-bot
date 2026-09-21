@@ -21,6 +21,10 @@ fn default_settings() -> SettingsRow {
         default_top_p: 0.9,
         summary_enabled: true,
         summary_interval_hours: 6,
+        tools_enabled: false,
+        web_search_enabled: false,
+        search_whitelist: "wikipedia.org".into(),
+        max_tool_rounds: 2,
     }
 }
 
@@ -70,7 +74,8 @@ fn valid_form_body(num_predict: i64) -> String {
     format!(
         "keep_alive=30m&ollama_timeout_secs=300&repeat_penalty=1.3&repeat_last_n=256&\
          num_predict={num_predict}&num_ctx=8192&default_temperature=0.7&default_top_p=0.9&\
-         summary_enabled=true&summary_interval_hours=6"
+         summary_enabled=true&summary_interval_hours=6&tools_enabled=false&web_search_enabled=false&\
+         search_whitelist=wikipedia.org&max_tool_rounds=2"
     )
 }
 

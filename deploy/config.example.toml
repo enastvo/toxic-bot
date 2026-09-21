@@ -26,3 +26,12 @@ dry_run = false
 # default_top_p = 0.9
 # summary_enabled = true
 # summary_interval_hours = 6
+# tools_enabled = false
+# web_search_enabled = false
+# max_tool_rounds = 2
+# search_whitelist = "wikipedia.org,reuters.com,..."   # editable live in the Settings UI
+
+# --- Web-search provider API key (SECRET) ---
+# Required only if you enable web search. Kept here (root-owned config), NEVER in
+# the DB or the web UI. Get a key from https://tavily.com and paste it below.
+# search_api_key = "tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"

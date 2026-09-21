@@ -63,11 +63,37 @@ pub fn parse_relevance(s: &str) -> Relevance {
 #[derive(Debug, Clone, Default)]
 pub struct GenStats { pub prompt_tokens: u32, pub reply_tokens: u32, pub total_ms: u64, pub eval_ms: u64 }
 
+/// A tool call the model requested in a `chat_step`.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub name: String,
+    /// Raw arguments as returned by the model (usually a JSON object).
+    pub arguments: serde_json::Value,
+}
+
+/// One assistant turn from `chat_step`: either final text (`tool_calls` empty)
+/// or a request to call tools.
+#[derive(Debug, Clone, Default)]
+pub struct AssistantStep {
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub stats: GenStats,
+}
+
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
     async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<(String, GenStats)>;
     async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>, timeout_secs: u64) -> anyhow::Result<Relevance>;
     async fn summarize(&self, model: &str, prior: &str, transcript: &str, timeout_secs: u64) -> anyhow::Result<String>;
+    /// One chat round with an explicit message array and optional tool schemas.
+    /// Returns the assistant's text and/or any tool calls it requested. The
+    /// router uses this to drive the (bounded) tool-call loop.
+    async fn chat_step(
+        &self,
+        messages: Vec<serde_json::Value>,
+        tools: &[serde_json::Value],
+        opts: &ChatRequest,
+    ) -> anyhow::Result<AssistantStep>;
 }
 
 pub struct MockLlm { pub reply: String, pub relevance: Relevance }
@@ -76,6 +102,17 @@ impl LlmBackend for MockLlm {
     async fn generate_reply(&self, _req: ChatRequest) -> anyhow::Result<(String, GenStats)> { Ok((self.reply.clone(), GenStats::default())) }
     async fn relevance_check(&self, _m: &str, _c: u32, _t: Vec<ChatTurn>, _timeout_secs: u64) -> anyhow::Result<Relevance> { Ok(self.relevance) }
     async fn summarize(&self, _model: &str, _prior: &str, _transcript: &str, _timeout_secs: u64) -> anyhow::Result<String> { Ok("[mock summary]".to_string()) }
+    async fn chat_step(&self, _messages: Vec<serde_json::Value>, _tools: &[serde_json::Value], _opts: &ChatRequest) -> anyhow::Result<AssistantStep> {
+        Ok(AssistantStep { content: self.reply.clone(), ..Default::default() })
+    }
+}
+
+/// Build the base `/api/chat` message array: the system prompt followed by the
+/// labeled conversation turns.
+pub(crate) fn base_messages(system: &str, turns: &[ChatTurn]) -> Vec<serde_json::Value> {
+    let mut msgs = vec![serde_json::json!({"role":"system","content": system})];
+    msgs.extend(turns.iter().map(turn_json));
+    msgs
 }
 
 /// A model reported as currently loaded by Ollama's `/api/ps`.
@@ -164,9 +201,36 @@ prior summary. Keep it under ~200 words. Be neutral and factual.";
 #[async_trait]
 impl LlmBackend for OllamaClient {
     async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<(String, GenStats)> {
-        let mut msgs = vec![serde_json::json!({"role":"system","content": req.system})];
-        msgs.extend(req.turns.iter().map(turn_json));
+        let msgs = base_messages(&req.system, &req.turns);
         self.chat_with_stats(&req.model, msgs, &req).await
+    }
+
+    async fn chat_step(
+        &self,
+        messages: Vec<serde_json::Value>,
+        tools: &[serde_json::Value],
+        opts: &ChatRequest,
+    ) -> anyhow::Result<AssistantStep> {
+        let mut body = build_chat_body(&opts.model, &messages, opts);
+        if !tools.is_empty() {
+            body["tools"] = serde_json::Value::Array(tools.to_vec());
+        }
+        let resp = self.http.post(format!("{}/api/chat", self.base_url))
+            .timeout(std::time::Duration::from_secs(opts.ollama_timeout_secs.max(1)))
+            .json(&body).send().await?.error_for_status()?;
+        let v: serde_json::Value = resp.json().await?;
+        let msg = &v["message"];
+        let content = sanitize(msg["content"].as_str().unwrap_or_default().trim());
+        let mut tool_calls = Vec::new();
+        if let Some(arr) = msg["tool_calls"].as_array() {
+            for tc in arr {
+                let f = &tc["function"];
+                if let Some(name) = f["name"].as_str() {
+                    tool_calls.push(ToolCall { name: name.to_string(), arguments: f["arguments"].clone() });
+                }
+            }
+        }
+        Ok(AssistantStep { content, tool_calls, stats: parse_gen_stats(&v) })
     }
 
     async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>, timeout_secs: u64) -> anyhow::Result<Relevance> {

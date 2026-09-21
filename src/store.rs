@@ -100,6 +100,10 @@ impl Store {
             default_top_p: row.get("default_top_p"),
             summary_enabled: row.get::<i64, _>("summary_enabled") != 0,
             summary_interval_hours: row.get("summary_interval_hours"),
+            tools_enabled: row.get::<i64, _>("tools_enabled") != 0,
+            web_search_enabled: row.get::<i64, _>("web_search_enabled") != 0,
+            search_whitelist: row.get("search_whitelist"),
+            max_tool_rounds: row.get("max_tool_rounds"),
         })
     }
 
@@ -107,8 +111,9 @@ impl Store {
         sqlx::query(
             "INSERT INTO settings (id, keep_alive, ollama_timeout_secs, repeat_penalty, repeat_last_n,
                                    num_predict, num_ctx, default_temperature, default_top_p, summary_enabled,
-                                   summary_interval_hours)
-             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   summary_interval_hours, tools_enabled, web_search_enabled, search_whitelist,
+                                   max_tool_rounds)
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                keep_alive = excluded.keep_alive,
                ollama_timeout_secs = excluded.ollama_timeout_secs,
@@ -119,7 +124,11 @@ impl Store {
                default_temperature = excluded.default_temperature,
                default_top_p = excluded.default_top_p,
                summary_enabled = excluded.summary_enabled,
-               summary_interval_hours = excluded.summary_interval_hours")
+               summary_interval_hours = excluded.summary_interval_hours,
+               tools_enabled = excluded.tools_enabled,
+               web_search_enabled = excluded.web_search_enabled,
+               search_whitelist = excluded.search_whitelist,
+               max_tool_rounds = excluded.max_tool_rounds")
             .bind(&s.keep_alive)
             .bind(s.ollama_timeout_secs)
             .bind(s.repeat_penalty)
@@ -130,6 +139,10 @@ impl Store {
             .bind(s.default_top_p)
             .bind(s.summary_enabled as i64)
             .bind(s.summary_interval_hours)
+            .bind(s.tools_enabled as i64)
+            .bind(s.web_search_enabled as i64)
+            .bind(&s.search_whitelist)
+            .bind(s.max_tool_rounds)
             .execute(&self.pool).await?;
         Ok(())
     }
@@ -161,6 +174,10 @@ pub struct SettingsRow {
     pub default_top_p: f64,
     pub summary_enabled: bool,
     pub summary_interval_hours: i64,
+    pub tools_enabled: bool,
+    pub web_search_enabled: bool,
+    pub search_whitelist: String,
+    pub max_tool_rounds: i64,
 }
 
 pub struct NewMessage {
@@ -222,6 +239,18 @@ impl Store {
 
     pub async fn history(&self, room_id: &str, limit: i64) -> anyhow::Result<Vec<StoredMessage>> {
         self.recent(room_id, limit).await
+    }
+
+    /// Keyword search over a single room's message bodies (case-insensitive
+    /// substring), newest first. Room-scoped so the `room_search` tool can
+    /// never surface another room's messages.
+    pub async fn search_room(&self, room_id: &str, term: &str, limit: i64) -> anyhow::Result<Vec<StoredMessage>> {
+        let like = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
+        let rows = sqlx::query(
+            "SELECT * FROM messages WHERE room_id = ? AND body LIKE ? ESCAPE '\\' \
+             ORDER BY ts DESC LIMIT ?")
+            .bind(room_id).bind(like).bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(Self::row_to_msg).collect())
     }
 
     /// Oldest-first page of messages strictly newer than `after_ts`, capped at `limit`.
@@ -369,7 +398,8 @@ mod tests {
         assert!(!s.settings_exists().await.unwrap());
         let row = SettingsRow { keep_alive:"30m".into(), ollama_timeout_secs:300, repeat_penalty:1.3,
             repeat_last_n:256, num_predict:512, num_ctx:8192, default_temperature:0.7, default_top_p:0.9,
-            summary_enabled:true, summary_interval_hours:6 };
+            summary_enabled:true, summary_interval_hours:6, tools_enabled:false, web_search_enabled:false,
+            search_whitelist:"wikipedia.org".into(), max_tool_rounds:2 };
         s.upsert_settings(&row).await.unwrap();
         assert!(s.settings_exists().await.unwrap());
         let got = s.get_settings().await.unwrap();

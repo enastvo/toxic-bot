@@ -92,6 +92,42 @@
     <input type="number" id="summary_interval_hours" name="summary_interval_hours" value="{{ summary_interval_hours }}" min="1" max="168" step="1" required>
   </p>
 
+  <h2 style="margin-top:1.5rem;">Tools</h2>
+
+  <p>
+    <label for="tools_enabled">Tools
+      <span title="Master switch. When enabled, the bot may call local tools (calculator, time, room-history search) while answering.">?</span>
+    </label><br>
+    <select id="tools_enabled" name="tools_enabled">
+      <option value="true" {% if tools_enabled %}selected{% endif %}>Enabled</option>
+      <option value="false" {% if !tools_enabled %}selected{% endif %}>Disabled</option>
+    </select>
+  </p>
+
+  <p>
+    <label for="web_search_enabled">Web search
+      <span title="Lets the bot search the web (restricted to the whitelist below) via the configured provider. Requires a provider API key in config.toml.">?</span>
+    </label><br>
+    <select id="web_search_enabled" name="web_search_enabled">
+      <option value="true" {% if web_search_enabled %}selected{% endif %}>Enabled</option>
+      <option value="false" {% if !web_search_enabled %}selected{% endif %}>Disabled</option>
+    </select>
+  </p>
+
+  <p>
+    <label for="search_whitelist">Search domain whitelist
+      <span title="Only these domains may be searched/read. Comma-, space- or newline-separated (e.g. wikipedia.org, reuters.com). Keep it to trusted, low-risk sites.">?</span>
+    </label><br>
+    <textarea id="search_whitelist" name="search_whitelist" rows="5" style="width:100%; max-width:640px; font-family:monospace;">{{ search_whitelist }}</textarea>
+  </p>
+
+  <p>
+    <label for="max_tool_rounds">Max tool rounds per reply
+      <span title="Hard cap on how many tool-call rounds the bot may take per message. Each round is another generation, so higher is slower. Range: 0-5.">?</span>
+    </label><br>
+    <input type="number" id="max_tool_rounds" name="max_tool_rounds" value="{{ max_tool_rounds }}" min="0" max="5" step="1" required>
+  </p>
+
   <button type="submit">Save</button>
 </form>
 {% endblock %}
