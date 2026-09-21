@@ -49,3 +49,44 @@ async fn sweep_summarizes_active_room_then_gates_until_new_activity() {
     let summary2 = store.get_summary("G").await.unwrap().unwrap();
     assert_eq!(summary2.covered_through_ts, 300);
 }
+
+/// A backlog bigger than the per-sweep fetch cap (200) must never leave a gap:
+/// covered_through_ts should only ever advance to the last message actually
+/// fetched, so the room stays due and successive sweeps catch up chunk by
+/// chunk until every message has been folded in — no ts is ever skipped over.
+#[tokio::test]
+async fn sweep_catches_up_incrementally_on_a_backlog_larger_than_the_cap() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    store.ensure_room("G", Some("Group"), true).await.unwrap();
+
+    const TOTAL: i64 = 205; // > RECENT_CAP (200)
+    for i in 0..TOTAL {
+        store.record_message(NewMessage {
+            room_id: "G".into(), sender_id: "alice".into(), sender_name: Some("Alice".into()),
+            role: Role::User, body: format!("msg {i}"), ts: 1000 + i, personality: None, is_mention: false,
+        }).await.unwrap();
+    }
+    let true_max_ts = 1000 + TOTAL - 1;
+
+    let llm = mock_llm();
+    let permit = Arc::new(Semaphore::new(1));
+
+    // First sweep: only the oldest 200 are fetched; covered_through_ts must land
+    // on the last one actually summarized, NOT on the true max — and must still
+    // be strictly less than the true max, since a backlog remains.
+    let n1 = run_sweep_once(&store, &llm, "test-model", &permit).await.unwrap();
+    assert_eq!(n1, 1);
+    let after_first = store.get_summary("G").await.unwrap().unwrap().covered_through_ts;
+    assert!(after_first < true_max_ts, "backlog remains: covered_through_ts must not jump past unseen messages");
+
+    // Room is still due: the next sweep must pick up exactly where the last one
+    // left off (no gap), fetching the remaining tail.
+    let n2 = run_sweep_once(&store, &llm, "test-model", &permit).await.unwrap();
+    assert_eq!(n2, 1);
+    let after_second = store.get_summary("G").await.unwrap().unwrap().covered_through_ts;
+    assert_eq!(after_second, true_max_ts, "second sweep must reach the true max ts with no skipped messages");
+
+    // Fully caught up: no more sweeps are due until new activity arrives.
+    let n3 = run_sweep_once(&store, &llm, "test-model", &permit).await.unwrap();
+    assert_eq!(n3, 0);
+}

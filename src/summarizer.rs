@@ -15,9 +15,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-/// Cap on how many recent messages we ever load per room before filtering
-/// down to those newer than the prior `covered_through_ts`. Bounds both the
-/// query and the transcript handed to the LLM.
+/// Max messages fetched (and summarized) per room per sweep. Bounds both the
+/// query and the transcript handed to the LLM. Fetches are oldest-unprocessed-first
+/// (see [`crate::store::Store::messages_since`]), so a backlog larger than this cap
+/// is never skipped — `covered_through_ts` only ever advances to the last message
+/// actually fetched, so the room stays "due" and the next sweep picks up exactly
+/// where this one left off, chunk by chunk, until it catches up.
 const RECENT_CAP: i64 = 200;
 
 /// Run one summarization pass over every room with unsummarized activity.
@@ -35,13 +38,17 @@ pub async fn run_sweep_once(
         let covered_through_ts = prior.as_ref().map(|s| s.covered_through_ts).unwrap_or(0);
         let prior_summary = prior.map(|s| s.summary).unwrap_or_default();
 
-        let recent = store.recent(&room, RECENT_CAP).await?;
-        let new_msgs: Vec<_> = recent.into_iter().filter(|m| m.ts > covered_through_ts).collect();
+        // Oldest-unprocessed-first: never skips over a backlog larger than RECENT_CAP.
+        let new_msgs = store.messages_since(&room, covered_through_ts, RECENT_CAP).await?;
         if new_msgs.is_empty() {
             continue;
         }
 
-        let new_covered_through_ts = new_msgs.iter().map(|m| m.ts).max().unwrap_or(covered_through_ts);
+        // Advance only to the last message actually fetched. If the backlog exceeded
+        // RECENT_CAP, this is still < the room's true MAX(ts), so
+        // `rooms_with_new_messages_since_summary` keeps surfacing it and the next
+        // sweep fetches the next chunk — monotonic catch-up, no gap, no loss.
+        let new_covered_through_ts = new_msgs.last().map(|m| m.ts).unwrap_or(covered_through_ts);
         let mut transcript = String::new();
         for m in &new_msgs {
             let who = m.sender_name.as_deref().unwrap_or(m.sender_id.as_str());

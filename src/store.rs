@@ -208,6 +208,16 @@ impl Store {
         self.recent(room_id, limit).await
     }
 
+    /// Oldest-first page of messages strictly newer than `after_ts`, capped at `limit`.
+    /// Used by the summarizer to catch up incrementally without skipping a backlog:
+    /// unlike `recent` (newest-N), this never leaves a gap between what was last
+    /// summarized and what gets fetched next.
+    pub async fn messages_since(&self, room_id: &str, after_ts: i64, limit: i64) -> anyhow::Result<Vec<StoredMessage>> {
+        let rows = sqlx::query("SELECT * FROM messages WHERE room_id = ? AND ts > ? ORDER BY ts ASC LIMIT ?")
+            .bind(room_id).bind(after_ts).bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(Self::row_to_msg).collect())
+    }
+
     pub async fn get_summary(&self, room_id: &str) -> anyhow::Result<Option<RoomSummary>> {
         let row = sqlx::query("SELECT * FROM room_summaries WHERE room_id = ?")
             .bind(room_id).fetch_optional(&self.pool).await?;
