@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         &cfg.data_dir,
     )
     .await?;
-    let llm = Arc::new(OllamaClient::new(cfg.ollama_url.clone()));
+    let llm = Arc::new(OllamaClient::new(cfg.ollama_url.clone(), cfg.ollama_timeout_secs as u64));
     let router = Arc::new(Router::new(
         store,
         personalities.clone(),

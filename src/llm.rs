@@ -75,11 +75,11 @@ impl LlmBackend for MockLlm {
 pub struct OllamaClient { base_url: String, http: reqwest::Client }
 
 impl OllamaClient {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, timeout_secs: u64) -> Self {
         Self {
             base_url: base_url.into(),
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(timeout_secs))
                 .build().expect("reqwest client"),
         }
     }
