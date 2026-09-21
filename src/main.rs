@@ -1,11 +1,13 @@
 use clap::Parser;
 use signal_bot::config::{AppConfig, Cli};
 use signal_bot::llm::OllamaClient;
+use signal_bot::metrics::Metrics;
+use signal_bot::orchestrator::Dispatcher;
 use signal_bot::personalities::Personalities;
 use signal_bot::router::Router;
 use signal_bot::signal::SignalCli;
 use signal_bot::store::Store;
-use signal_bot::web::{self, AppState, SseEvent};
+use signal_bot::web::{self, AppState};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -32,6 +34,14 @@ async fn main() -> anyhow::Result<()> {
         store.set_admin(username, &password).await?;
         println!("admin credential set for '{username}'");
         return Ok(());
+    }
+
+    // Seed the `settings` table (row id=1) from config defaults on first run.
+    // Skipped for the `--set-admin` bootstrap branch above, which already
+    // returned early; this runs before both the repl branch and the main
+    // loop so both benefit.
+    if !store.settings_exists().await? {
+        store.upsert_settings(&cfg.seed_settings_row()).await?;
     }
 
     let personalities = Arc::new(Personalities::load_dir(&cfg.personalities_dir)?);
@@ -69,7 +79,9 @@ async fn main() -> anyhow::Result<()> {
         &cfg.data_dir,
     )
     .await?;
-    let llm = Arc::new(OllamaClient::new(cfg.ollama_url.clone(), cfg.ollama_timeout_secs as u64));
+    let timeout = store.get_settings().await?.ollama_timeout_secs as u64;
+    let llm = Arc::new(OllamaClient::new(cfg.ollama_url.clone(), timeout));
+    let metrics = Metrics::new();
     let router = Arc::new(Router::new(
         store,
         personalities.clone(),
@@ -77,29 +89,20 @@ async fn main() -> anyhow::Result<()> {
         signal,
         cfg.signal_account.clone(),
         dry_run,
-        signal_bot::metrics::Metrics::new(),
+        metrics,
+        Some(state.tx.clone()),
     ));
+    let dispatcher = Dispatcher::new(router);
 
     // hot-reload watcher
     signal_bot::personalities_watch::spawn(personalities.clone(), cfg.personalities_dir.clone());
 
-    // receive loop
+    // receive loop: hand off to the dispatcher, which routes each message to
+    // its room's actor (coalescing bursts, serializing generation behind the
+    // global inference permit). SSE publishing happens inside the router's
+    // turn path (see Router::handle_burst), not here.
     while let Some(msg) = rx.recv().await {
-        let router = router.clone();
-        let tx = state.tx.clone();
-        tokio::spawn(async move {
-            let sender = msg.sender_name.clone().unwrap_or_else(|| msg.sender_id.clone());
-            let room_id = msg.room_id.clone();
-            let body = msg.body.clone();
-            let _ = tx.send(SseEvent { room_id: room_id.clone(), sender, body });
-            match router.handle(msg).await {
-                Ok(Some(reply)) => {
-                    let _ = tx.send(SseEvent { room_id, sender: "bot".into(), body: reply });
-                }
-                Ok(None) => {}
-                Err(e) => tracing::error!("handle error: {e}"),
-            }
-        });
+        dispatcher.dispatch(msg).await;
     }
     Ok(())
 }

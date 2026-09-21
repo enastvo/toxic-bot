@@ -4,6 +4,7 @@ use crate::personalities::{Personalities, Personality};
 use crate::signal::SignalTransport;
 use crate::store::{NewMessage, Store};
 use crate::types::{IncomingMessage, ReplyMode, Role, Room};
+use crate::web::SseEvent;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -107,15 +108,18 @@ pub struct Router {
     dry_run: bool,
     rl: RateLimiter,
     metrics: Arc<Metrics>,
+    sse: Option<tokio::sync::broadcast::Sender<crate::web::SseEvent>>,
 }
 
 fn now_secs() -> u64 { time::OffsetDateTime::now_utc().unix_timestamp() as u64 }
 fn now_ms() -> i64 { (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64 }
 
 impl Router {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(store: Store, personalities: Arc<Personalities>, llm: Arc<dyn LlmBackend>,
-               signal: Arc<dyn SignalTransport>, bot_id: String, dry_run: bool, metrics: Arc<Metrics>) -> Self {
-        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default(), metrics }
+               signal: Arc<dyn SignalTransport>, bot_id: String, dry_run: bool, metrics: Arc<Metrics>,
+               sse: Option<tokio::sync::broadcast::Sender<crate::web::SseEvent>>) -> Self {
+        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default(), metrics, sse }
     }
 
     /// Back-compat single-message entry point: a burst of one, with no wait.
@@ -141,12 +145,17 @@ impl Router {
             newest.is_group,
         ).await?;
 
-        // Record every (non-self) incoming message in arrival order.
+        // Record every (non-self) incoming message in arrival order, and
+        // publish it to the SSE stream (if configured) for live dashboard views.
         for m in &msgs {
             self.store.record_message(NewMessage {
                 room_id: m.room_id.clone(), sender_id: m.sender_id.clone(), sender_name: m.sender_name.clone(),
                 role: Role::User, body: m.body.clone(), ts: m.timestamp, personality: None, is_mention: m.is_mention,
             }).await?;
+            if let Some(sse) = &self.sse {
+                let sender = m.sender_name.clone().unwrap_or_else(|| m.sender_id.clone());
+                let _ = sse.send(SseEvent { room_id: m.room_id.clone(), sender, body: m.body.clone() });
+            }
         }
 
         let personality = self.personalities.get_or_default(room.personality.as_deref());
@@ -236,6 +245,9 @@ impl Router {
             personality: Some(personality.name.clone()), is_mention: false,
         }).await?;
         self.signal.send(&room.room_id, room.is_group, &reply).await?;
+        if let Some(sse) = &self.sse {
+            let _ = sse.send(SseEvent { room_id: room.room_id.clone(), sender: "bot".into(), body: reply.clone() });
+        }
 
         self.metrics.record(TurnRecord {
             room_id: room.room_id.clone(), ts: now_ms(), decision: dstr, wait_ms,
