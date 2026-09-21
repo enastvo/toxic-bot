@@ -32,9 +32,13 @@ fn default_summary_interval_hours() -> i64 { 6 }
 fn default_tools_enabled() -> bool { false }
 fn default_web_search_enabled() -> bool { false }
 fn default_max_tool_rounds() -> i64 { 2 }
-/// Curated, low-malware-risk default set of domains the bot may search.
-/// Editable live from the Settings page; kept in sync with migration 0004.
-pub const DEFAULT_SEARCH_WHITELIST: &str = "wikipedia.org,wikidata.org,wiktionary.org,britannica.com,merriam-webster.com,nasa.gov,noaa.gov,weather.gov,nih.gov,ncbi.nlm.nih.gov,cdc.gov,nist.gov,who.int,arxiv.org,nature.com,science.org,reuters.com,apnews.com,bbc.com,npr.org,pbs.org,theguardian.com,economist.com,developer.mozilla.org,docs.python.org,docs.rs,stackoverflow.com,github.com,man7.org";
+/// Default set of domains the bot may search, seeded into a fresh DB. Editable
+/// live from the Settings page (the live value is the DB row, not this const).
+/// Migration 0004 carries an equivalent literal for the column's initial add;
+/// that migration file is immutable once applied, so this const is the source
+/// of truth for fresh installs (the seed upsert overwrites the column default).
+/// The last group are partisan/opinion outlets included for the boomer persona.
+pub const DEFAULT_SEARCH_WHITELIST: &str = "wikipedia.org,wikidata.org,wiktionary.org,britannica.com,merriam-webster.com,nasa.gov,noaa.gov,weather.gov,nih.gov,ncbi.nlm.nih.gov,cdc.gov,nist.gov,who.int,arxiv.org,nature.com,science.org,reuters.com,apnews.com,bbc.com,npr.org,pbs.org,theguardian.com,economist.com,developer.mozilla.org,docs.python.org,docs.rs,stackoverflow.com,github.com,man7.org,breitbart.com,dailywire.com,newsmax.com,oann.com,tuckercarlson.com";
 fn default_search_whitelist() -> String { DEFAULT_SEARCH_WHITELIST.to_string() }
 
 #[derive(Debug, Clone, Deserialize)]
