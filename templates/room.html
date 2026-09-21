@@ -29,6 +29,16 @@
   <button type="submit">Set</button>
 </form>
 
+<form method="post" action="/rooms/{{ room_id }}/persona-sources" style="margin-top:1rem;">
+  <label for="persona_domains">Web sources for persona &ldquo;{{ persona_name }}&rdquo;</label>
+  <p style="margin:.25rem 0; font-size:.85em; opacity:.75;">
+    Extra domains this persona may web-search, one per line or comma-separated (e.g. <code>cnn.com</code>).
+    Applies to <strong>{{ persona_name }}</strong> in every room, on top of the global whitelist and the persona&rsquo;s built-in sources.
+  </p>
+  <textarea id="persona_domains" name="domains" rows="4" style="width:100%; max-width:640px; font-family:monospace;">{{ persona_domains }}</textarea>
+  <div><button type="submit">Save sources</button></div>
+</form>
+
 <h2>History</h2>
 <div id="history" data-room="{{ room_id }}">
 {% for m in messages %}

@@ -5,7 +5,7 @@
 //! args and decide what actually runs. Tool output is returned to the model as
 //! DATA, never instructions (prompt-injection containment).
 
-use crate::search::SearchProvider;
+use crate::search::{SearchParams, SearchProvider, SearchTopic};
 use crate::store::Store;
 use serde_json::{json, Value};
 
@@ -88,13 +88,36 @@ pub fn tool_schemas(web_search: bool) -> Vec<Value> {
                 "description": "Search the web for current or factual information. Restricted to a curated set of trusted sites. Use when you need up-to-date or external facts.",
                 "parameters": {
                     "type": "object",
-                    "properties": { "query": { "type": "string", "description": "what to search for" } },
+                    "properties": {
+                        "query": { "type": "string", "description": "what to search for" },
+                        "topic": {
+                            "type": "string",
+                            "enum": ["general", "news"],
+                            "description": "Use \"news\" for current events, headlines, or anything time-sensitive (recent days); use \"general\" (default) for reference or factual lookups."
+                        },
+                        "days": {
+                            "type": "integer",
+                            "description": "For topic=news only: how many days back to search (default 7). Use a small number for 'today'/'latest'."
+                        }
+                    },
                     "required": ["query"]
                 }
             }
         }));
     }
     tools
+}
+
+fn arg_u32(args: &Value, key: &str) -> Option<u32> {
+    // Ollama usually sends numbers as JSON numbers, but tolerate a numeric string.
+    let v = match args {
+        Value::Object(_) => args.get(key).cloned(),
+        Value::String(s) => serde_json::from_str::<Value>(s).ok().and_then(|v| v.get(key).cloned()),
+        _ => None,
+    }?;
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        .map(|n| n as u32)
 }
 
 fn arg_str(args: &Value, key: &str) -> Option<String> {
@@ -151,7 +174,11 @@ pub async fn execute(name: &str, args: &Value, ctx: &ToolCtx<'_>) -> String {
                 if ctx.whitelist.is_empty() {
                     return "No whitelisted domains are configured, so web search is unavailable.".into();
                 }
-                match provider.search(&q, ctx.whitelist, 5).await {
+                let params = SearchParams {
+                    topic: arg_str(args, "topic").map(|t| SearchTopic::parse(&t)).unwrap_or_default(),
+                    days: arg_u32(args, "days"),
+                };
+                match provider.search(&q, ctx.whitelist, 5, &params).await {
                     Ok(results) if results.is_empty() => {
                         format!("No results found on the whitelisted sites for \"{q}\".")
                     }

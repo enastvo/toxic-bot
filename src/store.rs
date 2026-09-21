@@ -153,6 +153,33 @@ impl Store {
         Ok(row.get::<i64, _>("cnt") > 0)
     }
 
+    /// Extra web-search domains configured for a personality via the dashboard,
+    /// normalized (scheme-stripped, lowercased, deduped). Empty if none set.
+    pub async fn get_persona_domains(&self, persona: &str) -> anyhow::Result<Vec<String>> {
+        let row = sqlx::query("SELECT domains FROM persona_search_domains WHERE persona = ?")
+            .bind(persona).fetch_optional(&self.pool).await?;
+        Ok(row
+            .map(|r| crate::tools::parse_whitelist(&r.get::<String, _>("domains")))
+            .unwrap_or_default())
+    }
+
+    /// Replace a personality's dashboard-configured domains. `raw` is free-form
+    /// (comma/space/newline separated); it is normalized before storing so the DB
+    /// stays clean. An empty/whitespace `raw` clears the row.
+    pub async fn set_persona_domains(&self, persona: &str, raw: &str) -> anyhow::Result<()> {
+        let normalized = crate::tools::parse_whitelist(raw).join(",");
+        if normalized.is_empty() {
+            sqlx::query("DELETE FROM persona_search_domains WHERE persona = ?")
+                .bind(persona).execute(&self.pool).await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO persona_search_domains (persona, domains) VALUES (?, ?)
+                 ON CONFLICT(persona) DO UPDATE SET domains = excluded.domains")
+                .bind(persona).bind(normalized).execute(&self.pool).await?;
+        }
+        Ok(())
+    }
+
     pub fn pool(&self) -> &SqlitePool { &self.pool }
 }
 
@@ -408,6 +435,24 @@ mod tests {
         let mut row2 = got.clone(); row2.num_predict = 1024;
         s.upsert_settings(&row2).await.unwrap();
         assert_eq!(s.get_settings().await.unwrap().num_predict, 1024);
+    }
+
+    #[tokio::test]
+    async fn persona_domains_roundtrip_and_normalizes() {
+        let s = mem().await;
+        // unknown persona -> empty
+        assert!(s.get_persona_domains("toxic").await.unwrap().is_empty());
+        // set normalizes (strips scheme, lowercases, dedupes) and persists
+        s.set_persona_domains("toxic", "https://CNN.com/, cnn.com  nytimes.com").await.unwrap();
+        assert_eq!(s.get_persona_domains("toxic").await.unwrap(), vec!["cnn.com", "nytimes.com"]);
+        // overwrite replaces the whole set
+        s.set_persona_domains("toxic", "foxnews.com").await.unwrap();
+        assert_eq!(s.get_persona_domains("toxic").await.unwrap(), vec!["foxnews.com"]);
+        // clearing removes them
+        s.set_persona_domains("toxic", "   ").await.unwrap();
+        assert!(s.get_persona_domains("toxic").await.unwrap().is_empty());
+        // personas are independent
+        assert!(s.get_persona_domains("boomer").await.unwrap().is_empty());
     }
 
     #[tokio::test]

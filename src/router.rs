@@ -37,6 +37,19 @@ fn decision_str(d: Decision) -> &'static str {
     }
 }
 
+/// A short, single-line preview of a (possibly long, multi-line) tool result for
+/// logging — so `journalctl` shows what a tool actually returned without dumping
+/// whole search payloads.
+fn preview(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > max {
+        let cut: String = flat.chars().take(max).collect();
+        format!("{cut}…")
+    } else {
+        flat
+    }
+}
+
 /// True if an error (anywhere in its cause chain) looks like a generation timeout.
 fn error_is_timeout(e: &anyhow::Error) -> bool {
     e.chain().any(|c| {
@@ -185,7 +198,9 @@ impl Router {
                 whitelist: &whitelist,
             };
             for tc in &step.tool_calls {
+                tracing::info!(room=%room_id, round=rounds, tool=%tc.name, args=%tc.arguments, "tool call");
                 let result = crate::tools::execute(&tc.name, &tc.arguments, &ctx).await;
+                tracing::info!(room=%room_id, tool=%tc.name, result_len=result.len(), result=%preview(&result, 240), "tool result");
                 messages.push(serde_json::json!({ "role": "tool", "content": result }));
             }
             rounds += 1;
@@ -287,9 +302,14 @@ impl Router {
             ollama_timeout_secs: settings.ollama_timeout_secs.max(1) as u64,
         };
         // When tools are enabled, drive the bounded tool-call loop; otherwise a
-        // single generation (unchanged behavior).
+        // single generation (unchanged behavior). Web-search domains for this
+        // persona = its TOML `extra_search_domains` plus any dashboard-configured
+        // domains from the DB (merged/deduped against the global whitelist inside
+        // the loop).
         let gen = if settings.tools_enabled {
-            self.run_tool_loop(&chatreq, &settings, &room.room_id, &personality.extra_search_domains).await
+            let mut extra = personality.extra_search_domains.clone();
+            extra.extend(self.store.get_persona_domains(&personality.name).await?);
+            self.run_tool_loop(&chatreq, &settings, &room.room_id, &extra).await
         } else {
             self.llm.generate_reply(chatreq).await
         };
@@ -436,6 +456,17 @@ mod tests {
         let r = room(ReplyMode::Addressed, true);
         assert!(!compose_system(&p, &r, None).contains("Earlier in this room:"));
         assert!(!compose_system(&p, &r, Some("   ")).contains("Earlier in this room:"));
+    }
+
+    #[test]
+    fn preview_flattens_and_truncates() {
+        use super::preview;
+        assert_eq!(preview("a\n  b\tc", 100), "a b c");
+        let long = "x".repeat(300);
+        let p = preview(&long, 10);
+        assert_eq!(p.chars().count(), 11); // 10 chars + ellipsis
+        assert!(p.ends_with('…'));
+        assert_eq!(preview("short", 10), "short");
     }
 
     #[test]

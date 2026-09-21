@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use signal_bot::llm::{AssistantStep, ChatRequest, GenStats, LlmBackend, Relevance, ToolCall};
 use signal_bot::personalities::Personalities;
 use signal_bot::router::Router;
-use signal_bot::search::{SearchProvider, SearchResult};
+use signal_bot::search::{SearchParams, SearchProvider, SearchResult, SearchTopic};
 use signal_bot::signal::MockSignal;
 use signal_bot::store::{SettingsRow, Store};
 use signal_bot::tools::{execute, ToolCtx};
@@ -88,15 +88,24 @@ async fn tool_loop_runs_calculator_and_returns_final_reply() {
     assert_eq!(sig.sent.lock().unwrap().len(), 1);
 }
 
-/// Records the domains it was asked to restrict to, so we can assert the
-/// whitelist is passed through to the provider.
+/// Records the domains and search params it was asked for, so we can assert both
+/// the whitelist and the model-chosen topic/recency are passed through.
 struct RecordingSearch {
     seen_domains: Mutex<Vec<String>>,
+    seen_topic: Mutex<Option<SearchTopic>>,
+    seen_days: Mutex<Option<u32>>,
+}
+impl RecordingSearch {
+    fn new() -> Self {
+        Self { seen_domains: Mutex::new(vec![]), seen_topic: Mutex::new(None), seen_days: Mutex::new(None) }
+    }
 }
 #[async_trait]
 impl SearchProvider for RecordingSearch {
-    async fn search(&self, _q: &str, include_domains: &[String], _max: usize) -> anyhow::Result<Vec<SearchResult>> {
+    async fn search(&self, _q: &str, include_domains: &[String], _max: usize, params: &SearchParams) -> anyhow::Result<Vec<SearchResult>> {
         *self.seen_domains.lock().unwrap() = include_domains.to_vec();
+        *self.seen_topic.lock().unwrap() = Some(params.topic);
+        *self.seen_days.lock().unwrap() = params.days;
         Ok(vec![SearchResult { title: "Rust".into(), url: "https://en.wikipedia.org/wiki/Rust".into(), content: "A language.".into() }])
     }
 }
@@ -104,7 +113,7 @@ impl SearchProvider for RecordingSearch {
 #[tokio::test]
 async fn web_search_passes_whitelist_and_formats_results() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
-    let provider = RecordingSearch { seen_domains: Mutex::new(vec![]) };
+    let provider = RecordingSearch::new();
     let whitelist = vec!["en.wikipedia.org".to_string(), "reuters.com".to_string()];
     let ctx = ToolCtx { store: &store, room_id: "r", search: Some(&provider), whitelist: &whitelist };
 
@@ -113,6 +122,76 @@ async fn web_search_passes_whitelist_and_formats_results() {
     assert!(out.contains("A language."), "result should include content: {out}");
     // the whitelist was passed to the provider as include_domains
     assert_eq!(*provider.seen_domains.lock().unwrap(), whitelist);
+    // no topic arg -> safe default (general), no recency window
+    assert_eq!(*provider.seen_topic.lock().unwrap(), Some(SearchTopic::General));
+    assert_eq!(*provider.seen_days.lock().unwrap(), None);
+}
+
+#[tokio::test]
+async fn web_search_threads_news_topic_and_days_to_provider() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let provider = RecordingSearch::new();
+    let whitelist = vec!["reuters.com".to_string()];
+    let ctx = ToolCtx { store: &store, room_id: "r", search: Some(&provider), whitelist: &whitelist };
+
+    let _ = execute("web_search", &json!({"query": "headlines today", "topic": "news", "days": 2}), &ctx).await;
+    assert_eq!(*provider.seen_topic.lock().unwrap(), Some(SearchTopic::News));
+    assert_eq!(*provider.seen_days.lock().unwrap(), Some(2));
+}
+
+/// Backend that requests a `web_search` on the first round, then returns a final
+/// reply on the second — used to drive the whole router tool loop end to end.
+struct WebSearchLlm {
+    round: Mutex<usize>,
+}
+#[async_trait]
+impl LlmBackend for WebSearchLlm {
+    async fn generate_reply(&self, _r: ChatRequest) -> anyhow::Result<(String, GenStats)> {
+        Ok(("unused".into(), GenStats::default()))
+    }
+    async fn relevance_check(&self, _m: &str, _c: u32, _t: Vec<signal_bot::types::ChatTurn>, _to: u64) -> anyhow::Result<Relevance> {
+        Ok(Relevance { should_reply: false, confidence: 0.0 })
+    }
+    async fn summarize(&self, _m: &str, _p: &str, _t: &str, _to: u64) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    async fn chat_step(&self, _messages: Vec<Value>, _tools: &[Value], _opts: &ChatRequest) -> anyhow::Result<AssistantStep> {
+        let mut r = self.round.lock().unwrap();
+        let this = *r;
+        *r += 1;
+        if this == 0 {
+            return Ok(AssistantStep { content: String::new(),
+                tool_calls: vec![ToolCall { name: "web_search".into(), arguments: json!({"query": "latest"}) }],
+                stats: GenStats::default() });
+        }
+        Ok(AssistantStep { content: "done".into(), tool_calls: vec![], stats: GenStats::default() })
+    }
+}
+
+#[tokio::test]
+async fn dashboard_persona_domains_reach_web_search() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let mut row = settings(true);
+    row.web_search_enabled = true;
+    row.search_whitelist = "wikipedia.org".into();
+    store.upsert_settings(&row).await.unwrap();
+    // dashboard-configured extra domain for the default persona ("default")
+    store.set_persona_domains("default", "cnn.com").await.unwrap();
+
+    let provider = Arc::new(RecordingSearch::new());
+    let sig = Arc::new(MockSignal::new());
+    let llm = Arc::new(WebSearchLlm { round: Mutex::new(0) });
+    let r = Router::new(store, personalities(), llm, sig, "+bot".into(), false,
+        signal_bot::metrics::Metrics::new(), None, Some(provider.clone()));
+
+    let msg = IncomingMessage { room_id: "+1000".into(), sender_id: "+1000".into(),
+        sender_name: Some("Alice".into()), body: "what's new".into(), is_group: false,
+        is_mention: false, quoted_msg: None, timestamp: 1 };
+    r.handle(msg).await.unwrap();
+
+    let seen = provider.seen_domains.lock().unwrap().clone();
+    assert!(seen.contains(&"wikipedia.org".to_string()), "global whitelist present: {seen:?}");
+    assert!(seen.contains(&"cnn.com".to_string()), "dashboard persona domain merged in: {seen:?}");
 }
 
 #[tokio::test]

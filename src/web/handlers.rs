@@ -62,6 +62,11 @@ struct RoomTemplate {
     mode_addressed: bool,
     mode_always: bool,
     mode_proactive: bool,
+    /// The persona whose dashboard web-sources are shown/edited (the room's
+    /// current personality). Editing applies to that persona in every room.
+    persona_name: String,
+    /// Comma-separated dashboard-configured web-search domains for `persona_name`.
+    persona_domains: String,
 }
 
 #[derive(Template)]
@@ -128,6 +133,11 @@ pub struct PersonalityForm {
 #[derive(Deserialize)]
 pub struct ModeForm {
     mode: String,
+}
+
+#[derive(Deserialize)]
+pub struct PersonaSourcesForm {
+    domains: String,
 }
 
 #[derive(Deserialize)]
@@ -276,6 +286,12 @@ pub async fn room_detail(State(state): State<AppState>, Path(room_id): Path<Stri
         .map(|p| PersonalityOption { selected: p.name == current_personality, name: p.name.clone() })
         .collect();
     let reply_mode = room.reply_mode;
+    let persona_domains = state
+        .store
+        .get_persona_domains(&current_personality)
+        .await
+        .unwrap_or_default()
+        .join(", ");
 
     html(
         RoomTemplate {
@@ -286,10 +302,32 @@ pub async fn room_detail(State(state): State<AppState>, Path(room_id): Path<Stri
             mode_addressed: reply_mode == ReplyMode::Addressed,
             mode_always: reply_mode == ReplyMode::Always,
             mode_proactive: reply_mode == ReplyMode::Proactive,
+            persona_name: current_personality,
+            persona_domains,
         }
         .render()
         .unwrap(),
     )
+}
+
+pub async fn set_persona_sources(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    Form(form): Form<PersonaSourcesForm>,
+) -> Response {
+    // Existence check first (same rationale as set_personality/set_mode: the id
+    // is reflected into the redirect Location).
+    let room = match state.store.get_room(&room_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    // Domains apply to the room's current persona (globally for that persona).
+    let persona = room.personality.unwrap_or_else(|| "default".to_string());
+    if state.store.set_persona_domains(&persona, &form.domains).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    Redirect::to(&format!("/rooms/{room_id}")).into_response()
 }
 
 pub async fn set_personality(
