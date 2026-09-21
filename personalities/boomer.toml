@@ -253,6 +253,10 @@ temperature = 0.75
 top_p = 0.9
 num_ctx = 8192
 
+# Persona-only web-search sources (merged on top of the global whitelist for
+# boomer's turns only; other personalities never see these).
+extra_search_domains = ["breitbart.com", "dailywire.com", "newsmax.com", "oann.com", "tuckercarlson.com"]
+
 [proactive]
 relevance_threshold = 0.82
 cooldown_secs = 240

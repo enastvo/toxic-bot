@@ -31,6 +31,10 @@ pub struct Personality {
     #[serde(default)] pub temperature_override: Option<f32>,
     #[serde(default)] pub top_p_override: Option<f32>,
     #[serde(default)] pub repeat_penalty: Option<f32>,
+    /// Extra web-search domains available to THIS personality only, merged on
+    /// top of the global whitelist for its turns. Lets a persona (e.g. boomer)
+    /// reach its own sources without polluting the shared whitelist.
+    #[serde(default)] pub extra_search_domains: Vec<String>,
 }
 fn default_model() -> String { "qwen3:8b".into() }
 fn def_temp() -> f32 { 0.6 }

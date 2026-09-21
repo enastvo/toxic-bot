@@ -31,6 +31,18 @@ pub fn parse_whitelist(s: &str) -> Vec<String> {
     out
 }
 
+/// Merge the global whitelist string with a personality's extra domains into a
+/// single deduped, normalized list. Extra domains apply only to that persona's
+/// turns, so the shared whitelist stays clean.
+pub fn merged_whitelist(global: &str, extra: &[String]) -> Vec<String> {
+    let mut combined = global.to_string();
+    for d in extra {
+        combined.push(',');
+        combined.push_str(d);
+    }
+    parse_whitelist(&combined)
+}
+
 /// The Ollama `tools` schema list offered to the model. `web_search` is only
 /// included when web search is actually available (enabled + provider present).
 pub fn tool_schemas(web_search: bool) -> Vec<Value> {
@@ -288,6 +300,16 @@ mod tests {
         assert!(eval_expr("2 ; 3").is_err());
         assert!(eval_expr("1/0").is_err());
         assert!(eval_expr("(1+2").is_err());
+    }
+
+    #[test]
+    fn merged_whitelist_adds_persona_domains_without_dupes() {
+        let global = "wikipedia.org, reuters.com";
+        let extra = vec!["breitbart.com".to_string(), "reuters.com".to_string()];
+        let m = merged_whitelist(global, &extra);
+        assert_eq!(m, vec!["wikipedia.org", "reuters.com", "breitbart.com"]);
+        // no extras -> just the global set
+        assert_eq!(merged_whitelist(global, &[]), vec!["wikipedia.org", "reuters.com"]);
     }
 
     #[test]
