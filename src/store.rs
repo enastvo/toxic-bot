@@ -144,6 +144,12 @@ impl Store {
 }
 
 #[derive(Clone, Debug)]
+pub struct RoomSummary {
+    pub summary: String,
+    pub covered_through_ts: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SettingsRow {
     pub keep_alive: String,
     pub ollama_timeout_secs: i64,
@@ -200,6 +206,39 @@ impl Store {
 
     pub async fn history(&self, room_id: &str, limit: i64) -> anyhow::Result<Vec<StoredMessage>> {
         self.recent(room_id, limit).await
+    }
+
+    pub async fn get_summary(&self, room_id: &str) -> anyhow::Result<Option<RoomSummary>> {
+        let row = sqlx::query("SELECT * FROM room_summaries WHERE room_id = ?")
+            .bind(room_id).fetch_optional(&self.pool).await?;
+        Ok(row.map(|r| RoomSummary {
+            summary: r.get("summary"),
+            covered_through_ts: r.get("covered_through_ts"),
+        }))
+    }
+
+    pub async fn upsert_summary(&self, room_id: &str, summary: &str, covered_through_ts: i64) -> anyhow::Result<()> {
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO room_summaries (room_id, summary, covered_through_ts, updated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(room_id) DO UPDATE SET
+               summary = excluded.summary,
+               covered_through_ts = excluded.covered_through_ts,
+               updated_at = excluded.updated_at")
+            .bind(room_id).bind(summary).bind(covered_through_ts).bind(now)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn rooms_with_new_messages_since_summary(&self) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT m.room_id FROM messages m
+             LEFT JOIN room_summaries s ON m.room_id = s.room_id
+             GROUP BY m.room_id
+             HAVING MAX(m.ts) > COALESCE(s.covered_through_ts, -1)")
+            .fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(|r| r.get("room_id")).collect())
     }
 }
 
@@ -272,5 +311,71 @@ mod tests {
         let mut row2 = got.clone(); row2.num_predict = 1024;
         s.upsert_settings(&row2).await.unwrap();
         assert_eq!(s.get_settings().await.unwrap().num_predict, 1024);
+    }
+
+    #[tokio::test]
+    async fn summary_roundtrip() {
+        let s = mem().await;
+        s.ensure_room("g1", None, true).await.unwrap();
+        // Before upsert, get returns None
+        assert!(s.get_summary("g1").await.unwrap().is_none());
+        // After upsert, get returns the values
+        s.upsert_summary("g1", "test summary", 100).await.unwrap();
+        let got = s.get_summary("g1").await.unwrap().unwrap();
+        assert_eq!(got.summary, "test summary");
+        assert_eq!(got.covered_through_ts, 100);
+        // Second upsert updates the values
+        s.upsert_summary("g1", "updated summary", 200).await.unwrap();
+        let got2 = s.get_summary("g1").await.unwrap().unwrap();
+        assert_eq!(got2.summary, "updated summary");
+        assert_eq!(got2.covered_through_ts, 200);
+    }
+
+    #[tokio::test]
+    async fn rooms_with_new_messages_since_summary() {
+        let s = mem().await;
+        s.ensure_room("g1", None, true).await.unwrap();
+        s.ensure_room("g2", None, true).await.unwrap();
+
+        // No messages yet, should return empty
+        assert!(s.rooms_with_new_messages_since_summary().await.unwrap().is_empty());
+
+        // Record messages in g1
+        s.record_message(NewMessage {
+            room_id: "g1".into(), sender_id: "u".into(), sender_name: Some("U".into()),
+            role: Role::User, body: "m1".into(), ts: 100, personality: None, is_mention: false,
+        }).await.unwrap();
+
+        // Now g1 should be returned (has messages but no summary)
+        let rooms = s.rooms_with_new_messages_since_summary().await.unwrap();
+        assert!(rooms.contains(&"g1".to_string()));
+        assert!(!rooms.contains(&"g2".to_string()));
+
+        // Record more messages in g1
+        s.record_message(NewMessage {
+            room_id: "g1".into(), sender_id: "u".into(), sender_name: Some("U".into()),
+            role: Role::User, body: "m2".into(), ts: 150, personality: None, is_mention: false,
+        }).await.unwrap();
+
+        // Still should return g1 since max ts (150) > covered_through_ts (0 default)
+        let rooms = s.rooms_with_new_messages_since_summary().await.unwrap();
+        assert!(rooms.contains(&"g1".to_string()));
+
+        // Upsert summary with covered_through_ts >= max ts
+        s.upsert_summary("g1", "summary", 150).await.unwrap();
+
+        // Now g1 should NOT be returned since covered_through_ts >= max ts
+        let rooms = s.rooms_with_new_messages_since_summary().await.unwrap();
+        assert!(!rooms.contains(&"g1".to_string()));
+
+        // Record new message with higher ts
+        s.record_message(NewMessage {
+            room_id: "g1".into(), sender_id: "u".into(), sender_name: Some("U".into()),
+            role: Role::User, body: "m3".into(), ts: 200, personality: None, is_mention: false,
+        }).await.unwrap();
+
+        // Now g1 should be returned again since max ts (200) > covered_through_ts (150)
+        let rooms = s.rooms_with_new_messages_since_summary().await.unwrap();
+        assert!(rooms.contains(&"g1".to_string()));
     }
 }
