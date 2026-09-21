@@ -8,7 +8,7 @@ use crate::store::SettingsRow;
 use crate::types::ReplyMode;
 use askama::Template;
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::{Form, Json};
@@ -353,6 +353,30 @@ pub async fn settings_submit(
     Redirect::to("/settings?saved=1").into_response()
 }
 
+// ---- static assets (public: the login background loads before auth) ----------
+
+static LOGIN_BG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/login-bg.jpg"));
+static APP_BG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/app-bg.jpg"));
+
+fn jpeg(bytes: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/jpeg"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+pub async fn login_bg() -> Response {
+    jpeg(LOGIN_BG)
+}
+
+pub async fn app_bg() -> Response {
+    jpeg(APP_BG)
+}
+
 // ---- health / metrics ----------------------------------------------------------
 
 pub async fn health_page() -> Response {
@@ -375,13 +399,52 @@ pub async fn api_metrics(State(state): State<AppState>) -> Response {
         Err(_) => json!({"reachable": false}),
     };
 
-    let orchestration = state.dispatcher.get().map(|d| d.gauges()).unwrap_or_default();
+    let gauges = state.dispatcher.get().map(|d| d.gauges()).unwrap_or_default();
+    let in_flight_room = gauges.in_flight.as_ref().map(|f| f.room.clone());
+
+    // Per-room table: merge DB footprint (store) with live turn metrics (ring)
+    // and current orchestration status (gauges).
+    let room_stats = state.store.room_stats().await.unwrap_or_default();
+    let per_room = state.metrics.per_room_stats();
+    let rm: std::collections::HashMap<&str, &crate::metrics::RoomTurnStats> =
+        per_room.iter().map(|r| (r.room_id.as_str(), r)).collect();
+    let total_messages: i64 = room_stats.iter().map(|r| r.msg_count).sum();
+    let db_size_bytes = state.store.db_size_bytes().await.unwrap_or(0);
+
+    let rooms: Vec<serde_json::Value> = room_stats
+        .iter()
+        .map(|r| {
+            let m = rm.get(r.room_id.as_str());
+            let working = in_flight_room.as_deref() == Some(r.room_id.as_str());
+            // "memory load" a room contributes: the messages it feeds into the
+            // model each turn (its trimmed context window) plus whether a
+            // running summary is loaded. (Process RSS is global, shown above.)
+            let context_msgs = r.msg_count.min(crate::context::MAX_WINDOW_MSGS as i64);
+            json!({
+                "room_id": r.room_id,
+                "name": r.display_name.clone().unwrap_or_else(|| r.room_id.clone()),
+                "personality": r.personality.clone().unwrap_or_else(|| "default".into()),
+                "reply_mode": r.reply_mode,
+                "status": if working { "working" } else { "idle" },
+                "last_message_ts": r.last_ts,
+                "msg_count": r.msg_count,
+                "body_bytes": r.body_bytes,
+                "context_msgs": context_msgs,
+                "summary_chars": r.summary_chars,
+                "replies": m.map(|x| x.replies).unwrap_or(0),
+                "errors": m.map(|x| x.errors).unwrap_or(0),
+                "avg_gen_ms": m.map(|x| x.avg_gen_ms).unwrap_or(0),
+            })
+        })
+        .collect();
 
     Json(json!({
         "system": system,
         "ollama": ollama,
         "llm": llm,
-        "orchestration": orchestration,
+        "orchestration": gauges,
+        "rooms": rooms,
+        "db": { "size_bytes": db_size_bytes, "total_messages": total_messages },
     }))
     .into_response()
 }

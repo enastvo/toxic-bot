@@ -76,7 +76,11 @@ pub fn build_router(state: AppState) -> Router {
 
     let public = Router::new()
         .route("/login", get(handlers::login_page).post(handlers::login_submit))
-        .route("/logout", post(handlers::logout));
+        .route("/logout", post(handlers::logout))
+        // Background images: the login background must load pre-auth, so both
+        // are public (they're static art, not sensitive).
+        .route("/assets/login-bg.jpg", get(handlers::login_bg))
+        .route("/assets/app-bg.jpg", get(handlers::app_bg));
 
     let protected = Router::new()
         .route("/", get(handlers::rooms_index))

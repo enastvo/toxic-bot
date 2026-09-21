@@ -17,7 +17,9 @@
     margin: 1rem 0 1.5rem;
   }
   .tile {
-    background: #14171b;
+    background: rgba(20, 23, 27, 0.74);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
     border: 1px solid #262b31;
     border-radius: 8px;
     padding: 0.75rem 0.9rem;
@@ -25,7 +27,9 @@
   .tile .label { font-size: 0.75rem; color: #9aa4af; text-transform: uppercase; letter-spacing: 0.03em; }
   .tile .value { font-size: 1.4rem; font-weight: 600; margin-top: 0.15rem; }
   section.card {
-    background: #14171b;
+    background: rgba(20, 23, 27, 0.74);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
     border: 1px solid #262b31;
     border-radius: 8px;
     padding: 1rem 1.1rem;
@@ -49,8 +53,13 @@
   .dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin-right: 0.4rem; }
   .dot.up { background: #7fd88f; }
   .dot.down { background: #ff8080; }
+  .dot.idle { background: #6b7480; }
   table.recent { font-size: 0.85rem; }
   table.recent th, table.recent td { padding: 0.35rem 0.6rem; }
+  table.rooms { font-size: 0.85rem; }
+  table.rooms th, table.rooms td { padding: 0.4rem 0.6rem; white-space: nowrap; }
+  table.rooms td.name { white-space: normal; max-width: 16rem; }
+  table.rooms .muted { color: #6b7480; }
   .stale { opacity: 0.5; }
 </style>
 
@@ -63,6 +72,7 @@
   <div class="tile"><div class="label">p50 gen (ms)</div><div class="value" id="t-p50">&mdash;</div></div>
   <div class="tile"><div class="label">p95 gen (ms)</div><div class="value" id="t-p95">&mdash;</div></div>
   <div class="tile"><div class="label">Tokens/sec</div><div class="value" id="t-tps">&mdash;</div></div>
+  <div class="tile"><div class="label">Database</div><div class="value" id="t-db">&mdash;</div></div>
 </div>
 
 <section class="card">
@@ -79,6 +89,19 @@
 <section class="card">
   <h2>Orchestration</h2>
   <div class="status-line" id="orch-status">&mdash;</div>
+</section>
+
+<section class="card">
+  <h2>Rooms</h2>
+  <div class="bar-caption" id="rooms-summary">&mdash;</div>
+  <table class="rooms">
+    <thead><tr>
+      <th>Room</th><th>Status</th><th>Personality</th><th>Mode</th>
+      <th>Last message</th><th>Messages</th><th>Size</th>
+      <th>Context</th><th>Summary</th><th>Avg resp</th><th>Replies</th><th>Errors</th>
+    </tr></thead>
+    <tbody id="rooms-body"><tr><td colspan="12">&mdash;</td></tr></tbody>
+  </table>
 </section>
 
 <section class="card">
@@ -103,6 +126,28 @@
 
   function fmtKb(kb) {
     return (kb / (1024 * 1024)).toFixed(1) + " GB";
+  }
+
+  function fmtBytes(b) {
+    b = b || 0;
+    if (b < 1024) return b + " B";
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB";
+    return (b / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function fmtAgo(ts) {
+    if (!ts) return "never";
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 60) return s + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
   }
 
   async function poll() {
@@ -171,7 +216,46 @@
       body.innerHTML = "<tr><td colspan=\"4\">no turns recorded yet</td></tr>";
     } else {
       body.innerHTML = recent.map(function (r) {
-        return "<tr><td>" + r.room_id + "</td><td>" + r.outcome + "</td><td>" + r.gen_ms + "</td><td>" + r.reply_tokens + "</td></tr>";
+        return "<tr><td>" + esc(r.room_id) + "</td><td>" + esc(r.outcome) + "</td><td>" + r.gen_ms + "</td><td>" + r.reply_tokens + "</td></tr>";
+      }).join("");
+    }
+
+    // Database tile
+    const db = data.db || {};
+    document.getElementById("t-db").textContent = fmtBytes(db.size_bytes || 0);
+
+    // Rooms table
+    const rooms = data.rooms || [];
+    document.getElementById("rooms-summary").textContent =
+      rooms.length + " room" + (rooms.length === 1 ? "" : "s") + " · " +
+      (db.total_messages || 0) + " messages · " + fmtBytes(db.size_bytes || 0) + " on disk";
+    const rbody = document.getElementById("rooms-body");
+    if (rooms.length === 0) {
+      rbody.innerHTML = "<tr><td colspan=\"12\">no rooms yet</td></tr>";
+    } else {
+      rbody.innerHTML = rooms.map(function (r) {
+        const working = r.status === "working";
+        const statusCell =
+          '<span class="dot ' + (working ? "up" : "idle") + '"></span>' + esc(r.status);
+        const avg = (r.avg_gen_ms && r.avg_gen_ms > 0) ? (r.avg_gen_ms + " ms") : '<span class="muted">&mdash;</span>';
+        const summary = (r.summary_chars && r.summary_chars > 0)
+          ? (r.summary_chars + " ch") : '<span class="muted">none</span>';
+        const errCell = (r.errors && r.errors > 0)
+          ? '<span class="error">' + r.errors + "</span>" : "0";
+        return "<tr>" +
+          '<td class="name" title="' + esc(r.room_id) + '">' + esc(r.name) + "</td>" +
+          "<td>" + statusCell + "</td>" +
+          "<td>" + esc(r.personality) + "</td>" +
+          "<td>" + esc(r.reply_mode) + "</td>" +
+          "<td>" + fmtAgo(r.last_message_ts) + "</td>" +
+          "<td>" + (r.msg_count || 0) + "</td>" +
+          "<td>" + fmtBytes(r.body_bytes || 0) + "</td>" +
+          "<td>" + (r.context_msgs || 0) + " msgs</td>" +
+          "<td>" + summary + "</td>" +
+          "<td>" + avg + "</td>" +
+          "<td>" + (r.replies || 0) + "</td>" +
+          "<td>" + errCell + "</td>" +
+          "</tr>";
       }).join("");
     }
   }
