@@ -163,9 +163,39 @@ async fn get_api_metrics_authed_returns_json_with_expected_keys() {
     assert!(json.get("ollama").is_some(), "missing 'ollama' key: {json}");
     assert!(json.get("llm").is_some(), "missing 'llm' key: {json}");
     assert!(json.get("orchestration").is_some(), "missing 'orchestration' key: {json}");
+    assert!(json["rooms"].is_array(), "missing 'rooms' array: {json}");
+    assert!(json.get("db").is_some(), "missing 'db' key: {json}");
+    assert!(json["db"]["size_bytes"].as_i64().unwrap_or(0) > 0, "db size not reported: {json}");
     // No real Ollama in the test env: `ps()` against 127.0.0.1:0 must fail and
     // degrade gracefully rather than error the handler.
     assert_eq!(json["ollama"]["reachable"], serde_json::json!(false));
+}
+
+#[tokio::test]
+async fn login_background_asset_is_public_jpeg() {
+    let (state, _store) = state().await;
+    let app = build_router(state);
+    // No auth cookie: the login background must be reachable pre-login.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/login-bg.jpg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .expect("content-type header present")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(ct, "image/jpeg", "content-type was: {ct}");
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert!(body.len() > 1000, "asset body too small: {}", body.len());
 }
 
 #[tokio::test]

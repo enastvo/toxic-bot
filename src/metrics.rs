@@ -57,6 +57,18 @@ pub struct MetricsSnapshot {
     pub recent: Vec<TurnRecord>,
 }
 
+/// Per-room aggregates over the metrics ring, for the health room table.
+#[derive(Debug, Clone, Serialize)]
+pub struct RoomTurnStats {
+    pub room_id: String,
+    pub replies: u64,
+    pub errors: u64,
+    /// Average generation time (ms) over this room's gen_ms>0 turns in the ring.
+    pub avg_gen_ms: u64,
+    /// ts (ms epoch) of the most recent recorded turn for this room.
+    pub last_turn_ts: i64,
+}
+
 /// In-memory store of recent turn records with response-time aggregates.
 pub struct Metrics {
     inner: Mutex<Ring>,
@@ -76,6 +88,53 @@ impl Metrics {
     /// Seconds since this `Metrics` instance (i.e. the bot process) started.
     pub fn uptime_secs(&self) -> u64 {
         self.start.elapsed().as_secs()
+    }
+
+    /// Per-room aggregates over the whole ring: reply/error counts, average
+    /// generation time (over gen_ms>0 turns), and the most recent turn ts.
+    pub fn per_room_stats(&self) -> Vec<RoomTurnStats> {
+        let ring = self.inner.lock().unwrap();
+        let all: Vec<TurnRecord> = ring.buf.iter().cloned().collect();
+        drop(ring);
+
+        struct Acc {
+            replies: u64,
+            errors: u64,
+            gen_sum: u64,
+            gen_n: u64,
+            last_ts: i64,
+        }
+        let mut map: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
+        for r in &all {
+            let a = map.entry(r.room_id.clone()).or_insert(Acc {
+                replies: 0,
+                errors: 0,
+                gen_sum: 0,
+                gen_n: 0,
+                last_ts: 0,
+            });
+            match r.outcome {
+                "sent" => a.replies += 1,
+                "error" => a.errors += 1,
+                _ => {}
+            }
+            if r.gen_ms > 0 {
+                a.gen_sum += r.gen_ms;
+                a.gen_n += 1;
+            }
+            if r.ts > a.last_ts {
+                a.last_ts = r.ts;
+            }
+        }
+        map.into_iter()
+            .map(|(room_id, a)| RoomTurnStats {
+                room_id,
+                replies: a.replies,
+                errors: a.errors,
+                avg_gen_ms: a.gen_sum.checked_div(a.gen_n).unwrap_or(0),
+                last_turn_ts: a.last_ts,
+            })
+            .collect()
     }
 
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -382,5 +441,34 @@ Cached:          1024000 kB
     fn metrics_uptime_secs_starts_near_zero() {
         let m = Metrics::new();
         assert!(m.uptime_secs() < 2);
+    }
+
+    #[test]
+    fn per_room_stats_aggregates_by_room() {
+        let m = Metrics::new();
+        let mk = |room: &str, gen_ms: u64, outcome: &'static str| TurnRecord {
+            room_id: room.to_string(),
+            ts: now_ms(),
+            decision: "reply",
+            wait_ms: 0,
+            gen_ms,
+            prompt_tokens: 0,
+            reply_tokens: 0,
+            outcome,
+        };
+        m.record(mk("a", 100, "sent"));
+        m.record(mk("a", 300, "sent"));
+        m.record(mk("a", 0, "error"));
+        m.record(mk("b", 200, "sent"));
+
+        let stats = m.per_room_stats();
+        let a = stats.iter().find(|r| r.room_id == "a").unwrap();
+        assert_eq!(a.replies, 2);
+        assert_eq!(a.errors, 1);
+        assert_eq!(a.avg_gen_ms, 200); // (100+300)/2, the error's gen_ms=0 excluded
+        let b = stats.iter().find(|r| r.room_id == "b").unwrap();
+        assert_eq!(b.replies, 1);
+        assert_eq!(b.errors, 0);
+        assert_eq!(b.avg_gen_ms, 200);
     }
 }

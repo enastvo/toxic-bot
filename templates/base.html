@@ -15,7 +15,9 @@
   }
   header {
     padding: 1rem 1.5rem;
-    background: #14171b;
+    background: rgba(16, 19, 23, 0.82);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     border-bottom: 1px solid #262b31;
     display: flex;
     justify-content: space-between;
@@ -61,9 +63,47 @@
   .error { color: #ff8080; }
   .success { color: #7fd88f; }
   a { color: #7fb0ff; }
+
+  /* Subdued painting backdrop. A fixed full-bleed layer sits behind all
+     content; the logged-in ("app") variant is darker than the login one so
+     the dense dashboard stays legible. */
+  body.app, body.login {
+    background: #05070a;
+  }
+  body.app::before, body.login::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+  }
+  body.app::before { background-image: url(/assets/app-bg.jpg); }
+  body.login::before { background-image: url(/assets/login-bg.jpg); }
+
+  /* Login page: no dashboard chrome, form centered in a translucent card. */
+  body.login header { display: none; }
+  body.login main {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .login-card {
+    background: rgba(16, 19, 23, 0.80);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid #2c333b;
+    border-radius: 12px;
+    padding: 1.75rem 2.1rem;
+    width: min(92vw, 360px);
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.55);
+  }
+  .login-card h1 { margin-top: 0.2rem; }
 </style>
 </head>
-<body>
+<body class="{% block body_class %}app{% endblock %}">
 <header>
   <div class="header-left">
     <a class="brand" href="/">Signal Bot</a>

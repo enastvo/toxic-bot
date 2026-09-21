@@ -174,6 +174,22 @@ pub struct NewMessage {
     pub is_mention: bool,
 }
 
+/// Per-room persistence footprint for the health dashboard's room table.
+#[derive(Clone, Debug)]
+pub struct RoomStat {
+    pub room_id: String,
+    pub display_name: Option<String>,
+    pub personality: Option<String>,
+    pub reply_mode: String,
+    pub msg_count: i64,
+    /// Approximate stored footprint: sum of message body lengths (bytes).
+    pub body_bytes: i64,
+    /// ts (ms epoch) of the most recent message in the room, 0 if none.
+    pub last_ts: i64,
+    /// Length (chars) of the room's running summary, 0 if none.
+    pub summary_chars: i64,
+}
+
 impl Store {
     pub async fn record_message(&self, m: NewMessage) -> anyhow::Result<i64> {
         let id = sqlx::query(
@@ -249,6 +265,47 @@ impl Store {
              HAVING MAX(m.ts) > COALESCE(s.covered_through_ts, -1)")
             .fetch_all(&self.pool).await?;
         Ok(rows.iter().map(|r| r.get("room_id")).collect())
+    }
+
+    /// Per-room persistence stats for the health dashboard: message count,
+    /// approximate stored bytes, last-message ts, and summary size. One
+    /// set-based query over every room (LEFT JOINs so empty rooms show as 0).
+    pub async fn room_stats(&self) -> anyhow::Result<Vec<RoomStat>> {
+        let rows = sqlx::query(
+            "SELECT r.room_id AS room_id,
+                    r.display_name AS display_name,
+                    r.personality AS personality,
+                    r.reply_mode AS reply_mode,
+                    COUNT(m.id) AS msg_count,
+                    COALESCE(SUM(LENGTH(m.body)), 0) AS body_bytes,
+                    COALESCE(MAX(m.ts), 0) AS last_ts,
+                    COALESCE(LENGTH(s.summary), 0) AS summary_chars
+             FROM rooms r
+             LEFT JOIN messages m ON m.room_id = r.room_id
+             LEFT JOIN room_summaries s ON s.room_id = r.room_id
+             GROUP BY r.room_id
+             ORDER BY last_ts DESC")
+            .fetch_all(&self.pool).await?;
+        Ok(rows
+            .iter()
+            .map(|r| RoomStat {
+                room_id: r.get("room_id"),
+                display_name: r.get("display_name"),
+                personality: r.get("personality"),
+                reply_mode: r.get::<String, _>("reply_mode"),
+                msg_count: r.get("msg_count"),
+                body_bytes: r.get("body_bytes"),
+                last_ts: r.get("last_ts"),
+                summary_chars: r.get("summary_chars"),
+            })
+            .collect())
+    }
+
+    /// Total on-disk size of the SQLite database in bytes (page_count * page_size).
+    pub async fn db_size_bytes(&self) -> anyhow::Result<i64> {
+        let page_count: i64 = sqlx::query("PRAGMA page_count").fetch_one(&self.pool).await?.get(0);
+        let page_size: i64 = sqlx::query("PRAGMA page_size").fetch_one(&self.pool).await?.get(0);
+        Ok(page_count * page_size)
     }
 }
 
@@ -387,5 +444,38 @@ mod tests {
         // Now g1 should be returned again since max ts (200) > covered_through_ts (150)
         let rooms = s.rooms_with_new_messages_since_summary().await.unwrap();
         assert!(rooms.contains(&"g1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn room_stats_and_db_size() {
+        let s = mem().await;
+        s.ensure_room("g1", Some("Group One"), true).await.unwrap();
+        s.ensure_room("g2", None, true).await.unwrap(); // empty room
+        for (body, ts) in [("hello", 100i64), ("world!!", 250)] {
+            s.record_message(NewMessage {
+                room_id: "g1".into(), sender_id: "u".into(), sender_name: Some("U".into()),
+                role: Role::User, body: body.into(), ts, personality: None, is_mention: false,
+            }).await.unwrap();
+        }
+        s.upsert_summary("g1", "running summary", 250).await.unwrap();
+
+        let stats = s.room_stats().await.unwrap();
+        assert_eq!(stats.len(), 2);
+        let g1 = stats.iter().find(|r| r.room_id == "g1").unwrap();
+        assert_eq!(g1.display_name.as_deref(), Some("Group One"));
+        assert_eq!(g1.msg_count, 2);
+        assert_eq!(g1.body_bytes, ("hello".len() + "world!!".len()) as i64);
+        assert_eq!(g1.last_ts, 250);
+        assert_eq!(g1.summary_chars, "running summary".len() as i64);
+        // g1 sorts before g2 (more recent last_ts)
+        assert_eq!(stats[0].room_id, "g1");
+
+        let g2 = stats.iter().find(|r| r.room_id == "g2").unwrap();
+        assert_eq!(g2.msg_count, 0);
+        assert_eq!(g2.body_bytes, 0);
+        assert_eq!(g2.last_ts, 0);
+        assert_eq!(g2.summary_chars, 0);
+
+        assert!(s.db_size_bytes().await.unwrap() > 0);
     }
 }
