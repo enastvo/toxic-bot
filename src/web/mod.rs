@@ -59,6 +59,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rooms/:id", get(handlers::room_detail))
         .route("/rooms/:id/personality", post(handlers::set_personality))
         .route("/rooms/:id/mode", post(handlers::set_mode))
+        .route("/settings", get(handlers::settings_page).post(handlers::settings_submit))
         .route("/events", get(handlers::sse_events))
         .route_layer(middleware::from_fn(auth::require_admin));
 

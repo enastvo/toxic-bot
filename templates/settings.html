@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<p><a href="/">&larr; Rooms</a></p>
+<h1>LLM Settings</h1>
+
+{% match error %}
+{% when Some with (e) %}
+<p class="error">{{ e }}</p>
+{% when None %}
+{% endmatch %}
+{% if saved %}
+<p class="success">Settings saved.</p>
+{% endif %}
+
+<form method="post" action="/settings">
+  <p>
+    <label for="keep_alive">Keep alive
+      <span title="How long to keep the LLM model loaded in memory between messages (e.g. 30m, 1h). Longer keeps replies fast but uses more RAM.">?</span>
+    </label><br>
+    <input type="text" id="keep_alive" name="keep_alive" value="{{ keep_alive }}" required>
+  </p>
+
+  <p>
+    <label for="ollama_timeout_secs">Ollama timeout (seconds)
+      <span title="How long to wait for the LLM to respond before giving up. Range: 10-600.">?</span>
+    </label><br>
+    <input type="number" id="ollama_timeout_secs" name="ollama_timeout_secs" value="{{ ollama_timeout_secs }}" min="10" max="600" step="1" required>
+  </p>
+
+  <p>
+    <label for="num_predict">Max reply length (tokens)
+      <span title="Maximum length of a generated reply, in tokens (roughly 3/4 of a word each). Range: 16-4096.">?</span>
+    </label><br>
+    <input type="number" id="num_predict" name="num_predict" value="{{ num_predict }}" min="16" max="4096" step="1" required>
+  </p>
+
+  <p>
+    <label for="num_ctx">Context window (tokens)
+      <span title="How much conversation history the model can see at once, in tokens. Range: 512-32768.">?</span>
+    </label><br>
+    <input type="number" id="num_ctx" name="num_ctx" value="{{ num_ctx }}" min="512" max="32768" step="1" required>
+  </p>
+
+  <p>
+    <label for="repeat_penalty">Repeat penalty
+      <span title="Discourages the model from repeating itself. Higher values reduce repetition but can make replies feel less natural. Range: 0.5-2.0.">?</span>
+    </label><br>
+    <input type="number" id="repeat_penalty" name="repeat_penalty" value="{{ repeat_penalty }}" min="0.5" max="2.0" step="0.1" required>
+  </p>
+
+  <p>
+    <label for="repeat_last_n">Repeat penalty window
+      <span title="How many recent tokens are considered when applying the repeat penalty. Range: 0-2048.">?</span>
+    </label><br>
+    <input type="number" id="repeat_last_n" name="repeat_last_n" value="{{ repeat_last_n }}" min="0" max="2048" step="1" required>
+  </p>
+
+  <p>
+    <label for="default_temperature">Default temperature
+      <span title="Controls randomness. Lower is more focused and predictable, higher is more creative and varied. Range: 0.0-2.0.">?</span>
+    </label><br>
+    <input type="number" id="default_temperature" name="default_temperature" value="{{ default_temperature }}" min="0.0" max="2.0" step="0.1" required>
+  </p>
+
+  <p>
+    <label for="default_top_p">Default top-p
+      <span title="Limits word choices to the most likely options. Lower is safer, higher allows more variety. Range: 0.0-1.0.">?</span>
+    </label><br>
+    <input type="number" id="default_top_p" name="default_top_p" value="{{ default_top_p }}" min="0.0" max="1.0" step="0.05" required>
+  </p>
+
+  <p>
+    <label for="summary_enabled">Conversation summaries
+      <span title="Whether the bot periodically summarizes long conversations to save context space.">?</span>
+    </label><br>
+    <select id="summary_enabled" name="summary_enabled">
+      <option value="true" {% if summary_enabled %}selected{% endif %}>Enabled</option>
+      <option value="false" {% if !summary_enabled %}selected{% endif %}>Disabled</option>
+    </select>
+  </p>
+
+  <p>
+    <label for="summary_interval_hours">Summary interval (hours)
+      <span title="How often, in hours, to generate a conversation summary. Range: 1-168.">?</span>
+    </label><br>
+    <input type="number" id="summary_interval_hours" name="summary_interval_hours" value="{{ summary_interval_hours }}" min="1" max="168" step="1" required>
+  </p>
+
+  <button type="submit">Save</button>
+</form>
+{% endblock %}
