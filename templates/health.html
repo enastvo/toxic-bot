@@ -10,6 +10,8 @@
 <h1>Health</h1>
 
 <style>
+  /* The dashboard needs more room than the default text-width main. */
+  main { max-width: 1200px; }
   .tiles {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -56,10 +58,15 @@
   .dot.idle { background: #6b7480; }
   table.recent { font-size: 0.85rem; }
   table.recent th, table.recent td { padding: 0.35rem 0.6rem; }
-  table.rooms { font-size: 0.85rem; }
+  table.rooms { font-size: 0.85rem; min-width: 100%; }
   table.rooms th, table.rooms td { padding: 0.4rem 0.6rem; white-space: nowrap; }
-  table.rooms td.name { white-space: normal; max-width: 16rem; }
+  /* Group room ids have no spaces and are very long; truncate with an
+     ellipsis (full id on hover via the cell's title) so they can't overrun
+     the neighbouring columns. */
+  table.rooms td.name { max-width: 15rem; overflow: hidden; text-overflow: ellipsis; }
   table.rooms .muted { color: #6b7480; }
+  /* Keep wide tables inside their card instead of spilling past its edge. */
+  .table-scroll { overflow-x: auto; }
   .stale { opacity: 0.5; }
 </style>
 
@@ -94,6 +101,7 @@
 <section class="card">
   <h2>Rooms</h2>
   <div class="bar-caption" id="rooms-summary">&mdash;</div>
+  <div class="table-scroll">
   <table class="rooms">
     <thead><tr>
       <th>Room</th><th>Status</th><th>Personality</th><th>Mode</th>
@@ -102,14 +110,17 @@
     </tr></thead>
     <tbody id="rooms-body"><tr><td colspan="12">&mdash;</td></tr></tbody>
   </table>
+  </div>
 </section>
 
 <section class="card">
   <h2>Recent responses</h2>
+  <div class="table-scroll">
   <table class="recent">
     <thead><tr><th>Room</th><th>Outcome</th><th>Gen (ms)</th><th>Reply tokens</th></tr></thead>
     <tbody id="recent-body"><tr><td colspan="4">&mdash;</td></tr></tbody>
   </table>
+  </div>
 </section>
 
 <script>
