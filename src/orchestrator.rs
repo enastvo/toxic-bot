@@ -19,16 +19,19 @@
 //! An actor that sees no traffic for `idle` removes itself from the rooms map
 //! and exits, to be respawned on the next dispatch. This introduces a race: a
 //! `dispatch` may hold a `Sender` clone for an actor that is exiting. It is
-//! handled on two sides:
-//! - The **actor**, on idle timeout, takes the rooms lock and does a final
-//!   non-blocking `try_recv` before exiting; if anything slipped in it processes
-//!   that instead of exiting. It only removes the map entry if it still points
-//!   at *its own* channel (`same_channel`), so a concurrent respawn is never
-//!   clobbered.
-//! - The **dispatcher**, if a `send` fails (the actor's receiver is gone),
-//!   removes the stale entry (again guarded by `same_channel`) and retries,
-//!   spawning a fresh actor. No message is lost: a failed send returns the
-//!   message, which the retry re-delivers.
+//! closed on two sides so that no message is ever lost or acknowledged-but-
+//! unprocessed:
+//! - The **actor**, on idle timeout, takes the rooms lock, removes its own map
+//!   entry (guarded by `same_channel` so a respawn is never clobbered), and
+//!   calls `rx.close()`. `close()` is atomic with respect to `send`: any racing
+//!   `send` either already landed in the buffer or now fails. It then releases
+//!   the lock and DRAINS the buffer, processing any stragglers as one last
+//!   coalesced turn before exiting — so a message that landed just before
+//!   `close()` is still handled.
+//! - The **dispatcher**, if a `send` fails (the channel is closed / the receiver
+//!   is gone), reclaims the returned message, removes the stale entry (again
+//!   guarded by `same_channel`), and retries — spawning a fresh actor and
+//!   re-delivering. A failed send returns the message, so it is never dropped.
 
 use crate::router::Router;
 use crate::types::IncomingMessage;
@@ -186,96 +189,118 @@ impl RoomActor {
         loop {
             // Wait for the first message of a batch, or reap on idle. `biased`
             // makes us always prefer draining the queue over timing out.
-            let first: IncomingMessage = tokio::select! {
+            let head: Option<IncomingMessage> = tokio::select! {
                 biased;
-                m = self.rx.recv() => match m {
-                    Some(m) => m,
-                    // All senders dropped: nothing more can arrive. (We hold
-                    // `self_tx`, so in practice this only fires after teardown.)
-                    None => return,
-                },
+                m = self.rx.recv() => m, // Some(m) normal; None = channel closed & drained
                 _ = tokio::time::sleep(self.idle) => {
-                    // Idle fired. Reap ourselves — but only after a final check
-                    // for a message that slipped in during the select.
-                    let disp = match self.dispatcher.upgrade() {
-                        Some(d) => d,
-                        None => return,
-                    };
-                    // Hold the rooms lock across the check+remove so no new
-                    // dispatch can clone our sender during the window. try_recv
-                    // is non-blocking, so no lock is held across an await.
-                    let mut rooms = disp.rooms.lock().unwrap();
-                    match self.rx.try_recv() {
-                        Ok(m) => {
-                            drop(rooms);
-                            m // late arrival: process it as the batch head.
-                        }
-                        Err(_) => {
-                            if let Some(tx) = rooms.get(&self.room_id) {
-                                if tx.same_channel(&self.self_tx) {
-                                    rooms.remove(&self.room_id);
-                                }
+                    // Idle fired: reap ourselves. This is the reap/dispatch race
+                    // window — a `dispatch` may already hold a `Sender` clone and
+                    // be about to `send().await`. We close that window with no
+                    // lost or silently-dropped message:
+                    //
+                    //   1. Under the rooms lock, remove our map entry (guarded by
+                    //      `same_channel` so a respawn is never clobbered) and
+                    //      call `rx.close()`. `close()` is atomic w.r.t. `send`:
+                    //      any racing send either already landed in the buffer
+                    //      (we drain it below) or now fails with `SendError`
+                    //      (the dispatcher's reclaim/respawn re-delivers it).
+                    //   2. Release the lock, then DRAIN the buffer and process
+                    //      any stragglers as one final coalesced turn before
+                    //      exiting. The drain/generation awaits, so it must run
+                    //      AFTER releasing the std MutexGuard.
+                    let Some(disp) = self.dispatcher.upgrade() else { return; };
+                    {
+                        let mut rooms = disp.rooms.lock().unwrap();
+                        if let Some(tx) = rooms.get(&self.room_id) {
+                            if tx.same_channel(&self.self_tx) {
+                                rooms.remove(&self.room_id);
                             }
-                            return; // exit; dropping rx closes the channel.
                         }
-                    }
+                        self.rx.close();
+                    } // rooms MutexGuard released here — never held across the await below.
+                    self.process_from(None).await;
+                    return;
                 }
             };
 
-            // Record the batch's start instant. wait_ms = elapsed from pulling
-            // the first message to just before generation, i.e. how long the
-            // burst was allowed to coalesce. We deliberately measure it BEFORE
-            // acquiring the permit so it reflects coalescing latency, not time
-            // spent queued behind another room's generation. (Documented
-            // simplification per the brief: one Instant for the batch head
-            // rather than per-message arrival stamps.)
-            let batch_start = Instant::now();
-
-            let mut batch: Vec<IncomingMessage> = Vec::new();
-            let mut seen_ts: HashSet<i64> = HashSet::new();
-            self.push_dedup(first, &mut batch, &mut seen_ts);
-
-            // Coalesce: drain everything immediately available without blocking.
-            while let Ok(m) = self.rx.try_recv() {
-                self.push_dedup(m, &mut batch, &mut seen_ts);
+            match head {
+                Some(m) => self.process_from(Some(m)).await,
+                // Channel closed and fully drained: nothing more can arrive.
+                None => return,
             }
-
-            if batch.is_empty() {
-                // Everything in this wake-up was a duplicate; nothing to do.
-                continue;
-            }
-
-            let max_ts = batch.iter().map(|m| m.timestamp).max().unwrap();
-            let wait_ms = batch_start.elapsed().as_millis() as u64;
-
-            // Acquire the global permit AROUND the whole handle_burst call
-            // (ruling T11-b). Messages arriving while we hold it queue in the
-            // mpsc and are drained on the next loop iteration (coalesced).
-            match self.permit.acquire().await {
-                Ok(_permit) => {
-                    if let Err(e) = self.handler.handle_burst(batch, wait_ms).await {
-                        // Log, don't crash the actor.
-                        tracing::error!(room = %self.room_id, error = %e, "handle_burst failed");
-                    }
-                    // _permit dropped here -> released.
-                }
-                Err(_) => {
-                    // Semaphore closed (never in practice). Drop the batch.
-                    tracing::error!(room = %self.room_id, "inference permit closed");
-                }
-            }
-
-            // Mark progress so exact-duplicate (and older) timestamps that
-            // arrive later are dropped.
-            self.last_processed_ts = Some(match self.last_processed_ts {
-                Some(prev) => prev.max(max_ts),
-                None => max_ts,
-            });
         }
+    }
+
+    /// Coalesce a batch starting from `head` (if any), draining everything else
+    /// immediately available, dedupe, and — if the batch is non-empty — run it
+    /// through the global inference permit. Updates `last_processed_ts`.
+    ///
+    /// Used both for the normal per-message path (`head = Some`) and for the
+    /// reap drain (`head = None`, process whatever the closed channel still
+    /// buffers).
+    async fn process_from(&mut self, head: Option<IncomingMessage>) {
+        // Record the batch's start instant. wait_ms = elapsed from pulling the
+        // first message to just before generation, i.e. how long the burst was
+        // allowed to coalesce. We deliberately measure it BEFORE acquiring the
+        // permit so it reflects coalescing latency, not time spent queued behind
+        // another room's generation. (Documented simplification per the brief:
+        // one Instant for the batch head rather than per-message arrival stamps.)
+        let batch_start = Instant::now();
+
+        let mut batch: Vec<IncomingMessage> = Vec::new();
+        let mut seen_ts: HashSet<i64> = HashSet::new();
+        if let Some(h) = head {
+            self.push_dedup(h, &mut batch, &mut seen_ts);
+        }
+
+        // Coalesce: drain everything immediately available without blocking.
+        // (After `close()` this drains the remaining buffer, then stops.)
+        while let Ok(m) = self.rx.try_recv() {
+            self.push_dedup(m, &mut batch, &mut seen_ts);
+        }
+
+        if batch.is_empty() {
+            // Everything in this wake-up was a duplicate (or nothing buffered).
+            return;
+        }
+
+        let max_ts = batch.iter().map(|m| m.timestamp).max().unwrap();
+        let wait_ms = batch_start.elapsed().as_millis() as u64;
+
+        // Acquire the global permit AROUND the whole handle_burst call (ruling
+        // T11-b). Messages arriving while we hold it queue in the mpsc and are
+        // drained on the next loop iteration (coalesced).
+        match self.permit.acquire().await {
+            Ok(_permit) => {
+                if let Err(e) = self.handler.handle_burst(batch, wait_ms).await {
+                    // Log, don't crash the actor.
+                    tracing::error!(room = %self.room_id, error = %e, "handle_burst failed");
+                }
+                // _permit dropped here -> released.
+            }
+            Err(_) => {
+                // Semaphore closed (never in practice). Drop the batch.
+                tracing::error!(room = %self.room_id, "inference permit closed");
+            }
+        }
+
+        // Mark progress so exact-duplicate (and older) timestamps that arrive
+        // later are dropped.
+        self.last_processed_ts = Some(match self.last_processed_ts {
+            Some(prev) => prev.max(max_ts),
+            None => max_ts,
+        });
     }
 
     /// Push `m` into `batch` unless its timestamp duplicates one already in the
     /// batch, or is at/below the last processed timestamp (already handled).
+    ///
+    /// Dedupe key is the (timestamp) ALONE, by design: the Signal server
+    /// timestamp is a millisecond epoch and a true resend of a message carries
+    /// the same timestamp, so an exact-ts match is the resend signal. Two
+    /// genuinely distinct messages that happen to share a ts are intentionally
+    /// treated as duplicates (acceptable — collisions at ms granularity in one
+    /// room are vanishingly rare).
     fn push_dedup(
         &self,
         m: IncomingMessage,

@@ -190,12 +190,20 @@ async fn global_serialization() {
     }
 
     // Up to ~8 serialized batches * 40ms; poll up to 2s.
+    // Wait until ALL dispatched work has fully COMPLETED, not merely started:
+    // every distinct message (4 rooms * 3 distinct ts = 12) has been seen AND
+    // nothing is still in flight. Only then can we be sure a late overlap would
+    // have been observed by `max_in_flight`.
     let done = wait_until(
-        || fake.invocations.load(SeqCst) >= 4,
+        || fake.messages_seen.load(SeqCst) == 12 && fake.in_flight.load(SeqCst) == 0,
         Duration::from_millis(2000),
     )
     .await;
-    assert!(done, "every room must be processed at least once");
+    assert!(done, "all dispatched work must complete");
+    assert!(
+        fake.invocations.load(SeqCst) >= 4,
+        "every room must be processed at least once"
+    );
     assert_eq!(
         fake.max_in_flight.load(SeqCst),
         1,
@@ -229,4 +237,39 @@ async fn idle_reap_and_respawn() {
         wait_until(|| fake.invocations.load(SeqCst) == 2, Duration::from_millis(500)).await,
         "respawned actor must process the new message"
     );
+}
+
+/// Hammer the reap boundary: dispatch many distinct messages with inter-arrival
+/// pauses that straddle a very short idle window, so dispatches repeatedly race
+/// actor reaps. Every message must still be processed exactly once — the
+/// drain-on-close reap path plus the dispatcher's send-failure reclaim guarantee
+/// no message is lost or silently dropped across a reap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_message_lost_across_reap() {
+    let fake = Arc::new(FakeHandler::new(Duration::from_millis(2)));
+    // Idle short enough that the actor reaps between many of the dispatches.
+    let disp = Dispatcher::with_handler(fake.clone(), Duration::from_millis(15));
+
+    const N: i64 = 40;
+    for ts in 1..=N {
+        disp.dispatch(mk_msg("roomA", ts)).await;
+        // Pauses that hover around the idle window to maximize reap/dispatch
+        // interleaving: alternate under- and over-idle sleeps.
+        let nap = if ts % 2 == 0 { 8 } else { 20 };
+        tokio::time::sleep(Duration::from_millis(nap)).await;
+    }
+
+    // All N distinct messages must be seen (coalescing may bundle some into the
+    // same turn, so we assert on total messages, not invocation count).
+    let done = wait_until(
+        || fake.messages_seen.load(SeqCst) == N as usize,
+        Duration::from_millis(2000),
+    )
+    .await;
+    let seen = fake.messages_seen.load(SeqCst);
+    assert!(done, "no message may be lost across reaps: saw {seen}/{N}");
+
+    let mut ts = fake.seen_ts.lock().unwrap().clone();
+    ts.sort_unstable();
+    assert_eq!(ts, (1..=N).collect::<Vec<_>>(), "every ts processed once");
 }
