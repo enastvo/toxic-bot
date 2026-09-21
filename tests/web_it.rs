@@ -1,11 +1,13 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use signal_bot::llm::OllamaClient;
+use signal_bot::metrics::Metrics;
 use signal_bot::personalities::Personalities;
 use signal_bot::store::Store;
 use signal_bot::types::ReplyMode;
 use signal_bot::web::{build_router, AppState};
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
 
 async fn state() -> (AppState, Store) {
@@ -18,7 +20,8 @@ async fn state() -> (AppState, Store) {
     let p = Arc::new(Personalities::load_dir(d.path()).unwrap());
     std::mem::forget(d);
     let st = store.clone();
-    (AppState::new(store, p), st)
+    let ollama = Arc::new(OllamaClient::new("http://127.0.0.1:0", 300));
+    (AppState::new(store, p, Metrics::new(), ollama, Arc::new(OnceLock::new())), st)
 }
 
 #[tokio::test]

@@ -1,12 +1,15 @@
 use clap::Parser;
 use signal_bot::config::{AppConfig, Cli};
-use signal_bot::llm::OllamaClient;
+use signal_bot::llm::{LlmBackend, OllamaClient};
+use signal_bot::metrics::Metrics;
+use signal_bot::orchestrator::Dispatcher;
 use signal_bot::personalities::Personalities;
 use signal_bot::router::Router;
 use signal_bot::signal::SignalCli;
 use signal_bot::store::Store;
-use signal_bot::web::{self, AppState, SseEvent};
-use std::sync::Arc;
+use signal_bot::summarizer;
+use signal_bot::web::{self, AppState};
+use std::sync::{Arc, OnceLock};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -34,11 +37,38 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Seed the `settings` table (row id=1) from config defaults on first run.
+    // Skipped for the `--set-admin` bootstrap branch above, which already
+    // returned early; this runs before both the repl branch and the main
+    // loop so both benefit.
+    if !store.settings_exists().await? {
+        store.upsert_settings(&cfg.seed_settings_row()).await?;
+    }
+
     let personalities = Arc::new(Personalities::load_dir(&cfg.personalities_dir)?);
     let dry_run = cli.dry_run || cfg.dry_run;
 
+    // Metrics + the Ollama client are created early (before the web server)
+    // and shared with the Router built later, so `/api/metrics` and the
+    // actual generation path report on the exact same instances.
+    let timeout = store.get_settings().await?.ollama_timeout_secs as u64;
+    let metrics = Metrics::new();
+    let ollama = Arc::new(OllamaClient::new(cfg.ollama_url.clone(), timeout));
+
+    // The Dispatcher doesn't exist yet at this point (it needs `SignalCli` and
+    // the `Router`, built further below), but the web server is spawned now.
+    // This cell lets `/api/metrics` read dispatcher gauges once it's ready,
+    // reporting empty gauges in the meantime.
+    let dispatcher_cell: Arc<OnceLock<Arc<Dispatcher>>> = Arc::new(OnceLock::new());
+
     // web state + server
-    let state = AppState::new(store.clone(), personalities.clone());
+    let state = AppState::new(
+        store.clone(),
+        personalities.clone(),
+        metrics.clone(),
+        ollama.clone(),
+        dispatcher_cell.clone(),
+    );
     {
         let (bind, cert, key, st) = (
             cfg.bind_addr.clone(),
@@ -69,36 +99,38 @@ async fn main() -> anyhow::Result<()> {
         &cfg.data_dir,
     )
     .await?;
-    let llm = Arc::new(OllamaClient::new(cfg.ollama_url.clone()));
     let router = Arc::new(Router::new(
-        store,
+        store.clone(),
         personalities.clone(),
-        llm,
+        ollama.clone() as Arc<dyn LlmBackend>,
         signal,
         cfg.signal_account.clone(),
         dry_run,
+        metrics.clone(),
+        Some(state.tx.clone()),
     ));
+    let dispatcher = Dispatcher::new(router);
+    let _ = dispatcher_cell.set(dispatcher.clone());
 
     // hot-reload watcher
     signal_bot::personalities_watch::spawn(personalities.clone(), cfg.personalities_dir.clone());
 
-    // receive loop
+    // Per-room summarization sweep: shares the dispatcher's global inference
+    // permit so a sweep never competes with a user-facing generation for the
+    // model (it just waits its turn). Settings-gated.
+    let settings = store.get_settings().await?;
+    if settings.summary_enabled {
+        let model = personalities.get_or_default(None).model.clone();
+        let interval = std::time::Duration::from_secs((settings.summary_interval_hours.max(1) as u64) * 3600);
+        summarizer::spawn(store.clone(), ollama.clone() as Arc<dyn LlmBackend>, model, dispatcher.inference_permit(), interval);
+    }
+
+    // receive loop: hand off to the dispatcher, which routes each message to
+    // its room's actor (coalescing bursts, serializing generation behind the
+    // global inference permit). SSE publishing happens inside the router's
+    // turn path (see Router::handle_burst), not here.
     while let Some(msg) = rx.recv().await {
-        let router = router.clone();
-        let tx = state.tx.clone();
-        tokio::spawn(async move {
-            let sender = msg.sender_name.clone().unwrap_or_else(|| msg.sender_id.clone());
-            let room_id = msg.room_id.clone();
-            let body = msg.body.clone();
-            let _ = tx.send(SseEvent { room_id: room_id.clone(), sender, body });
-            match router.handle(msg).await {
-                Ok(Some(reply)) => {
-                    let _ = tx.send(SseEvent { room_id, sender: "bot".into(), body: reply });
-                }
-                Ok(None) => {}
-                Err(e) => tracing::error!("handle error: {e}"),
-            }
-        });
+        dispatcher.dispatch(msg).await;
     }
     Ok(())
 }

@@ -9,8 +9,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub async fn run(store: Store, personalities: Arc<Personalities>, dry_run: bool, ollama_url: String) -> anyhow::Result<()> {
     let sig = Arc::new(MockSignal::new());
-    let llm = Arc::new(OllamaClient::new(ollama_url));
-    let router = Router::new(store, personalities, llm, sig, "+bot".into(), dry_run);
+    let llm = Arc::new(OllamaClient::new(ollama_url, 300));
+    let router = Router::new(store, personalities, llm, sig, "+bot".into(), dry_run, crate::metrics::Metrics::new(), None);
     eprintln!("REPL: room|group(0/1)|mention(0/1)|sender|text  (Ctrl-D to exit)");
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {

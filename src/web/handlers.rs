@@ -2,15 +2,19 @@
 
 use super::auth::{self, LoginLimiter};
 use super::{AppState, SseEvent};
+use crate::metrics;
+use crate::settings;
+use crate::store::SettingsRow;
 use crate::types::ReplyMode;
 use askama::Template;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::Form;
+use axum::{Form, Json};
 use futures::stream::Stream;
 use serde::Deserialize;
+use serde_json::json;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::sync::broadcast;
@@ -60,6 +64,46 @@ struct RoomTemplate {
     mode_proactive: bool,
 }
 
+#[derive(Template)]
+#[template(path = "health.html")]
+struct HealthTemplate;
+
+#[derive(Template)]
+#[template(path = "settings.html")]
+struct SettingsTemplate {
+    keep_alive: String,
+    ollama_timeout_secs: i64,
+    repeat_penalty: f64,
+    repeat_last_n: i64,
+    num_predict: i64,
+    num_ctx: i64,
+    default_temperature: f64,
+    default_top_p: f64,
+    summary_enabled: bool,
+    summary_interval_hours: i64,
+    error: Option<String>,
+    saved: bool,
+}
+
+impl SettingsTemplate {
+    fn from_row(row: &SettingsRow, error: Option<String>, saved: bool) -> Self {
+        Self {
+            keep_alive: row.keep_alive.clone(),
+            ollama_timeout_secs: row.ollama_timeout_secs,
+            repeat_penalty: row.repeat_penalty,
+            repeat_last_n: row.repeat_last_n,
+            num_predict: row.num_predict,
+            num_ctx: row.num_ctx,
+            default_temperature: row.default_temperature,
+            default_top_p: row.default_top_p,
+            summary_enabled: row.summary_enabled,
+            summary_interval_hours: row.summary_interval_hours,
+            error,
+            saved,
+        }
+    }
+}
+
 // ---- forms ----------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -76,6 +120,45 @@ pub struct PersonalityForm {
 #[derive(Deserialize)]
 pub struct ModeForm {
     mode: String,
+}
+
+#[derive(Deserialize)]
+pub struct SettingsForm {
+    keep_alive: String,
+    ollama_timeout_secs: i64,
+    repeat_penalty: f64,
+    repeat_last_n: i64,
+    num_predict: i64,
+    num_ctx: i64,
+    default_temperature: f64,
+    default_top_p: f64,
+    // HTML checkboxes post "on"/nothing, which serde's bool parser rejects.
+    // Rendered as a <select> with values "true"/"false" instead, then mapped
+    // to bool here (anything other than the literal "true" is false).
+    summary_enabled: String,
+    summary_interval_hours: i64,
+}
+
+impl From<SettingsForm> for SettingsRow {
+    fn from(f: SettingsForm) -> Self {
+        SettingsRow {
+            keep_alive: f.keep_alive,
+            ollama_timeout_secs: f.ollama_timeout_secs,
+            repeat_penalty: f.repeat_penalty,
+            repeat_last_n: f.repeat_last_n,
+            num_predict: f.num_predict,
+            num_ctx: f.num_ctx,
+            default_temperature: f.default_temperature,
+            default_top_p: f.default_top_p,
+            summary_enabled: f.summary_enabled == "true",
+            summary_interval_hours: f.summary_interval_hours,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SettingsQuery {
+    saved: Option<String>,
 }
 
 fn html(body: String) -> Response {
@@ -246,6 +329,61 @@ pub async fn set_mode(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     Redirect::to(&format!("/rooms/{room_id}")).into_response()
+}
+
+pub async fn settings_page(State(state): State<AppState>, Query(q): Query<SettingsQuery>) -> Response {
+    let row = match state.store.get_settings().await {
+        Ok(r) => r,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    html(SettingsTemplate::from_row(&row, None, q.saved.is_some()).render().unwrap())
+}
+
+pub async fn settings_submit(
+    State(state): State<AppState>,
+    Form(form): Form<SettingsForm>,
+) -> Response {
+    let row: SettingsRow = form.into();
+    if let Err(msg) = settings::validate(&row) {
+        return html(SettingsTemplate::from_row(&row, Some(msg), false).render().unwrap());
+    }
+    if state.store.upsert_settings(&row).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    Redirect::to("/settings?saved=1").into_response()
+}
+
+// ---- health / metrics ----------------------------------------------------------
+
+pub async fn health_page() -> Response {
+    html(HealthTemplate.render().unwrap())
+}
+
+/// `GET /api/metrics`: a snapshot combining system resources, Ollama's loaded
+/// models, the LLM turn-metrics ring, and the dispatcher's orchestration
+/// gauges. Degrades gracefully: an unreachable Ollama or a not-yet-built
+/// dispatcher (the web server starts before the dispatcher does, see `main`)
+/// never fails the request, they just report as absent/empty.
+pub async fn api_metrics(State(state): State<AppState>) -> Response {
+    let mut system = metrics::system_snapshot();
+    system.uptime_secs = state.metrics.uptime_secs();
+
+    let llm = state.metrics.snapshot();
+
+    let ollama = match state.ollama.ps().await {
+        Ok(ps) => json!({"reachable": true, "models": ps.models}),
+        Err(_) => json!({"reachable": false}),
+    };
+
+    let orchestration = state.dispatcher.get().map(|d| d.gauges()).unwrap_or_default();
+
+    Json(json!({
+        "system": system,
+        "ollama": ollama,
+        "llm": llm,
+        "orchestration": orchestration,
+    }))
+    .into_response()
 }
 
 // ---- SSE ----------------------------------------------------------

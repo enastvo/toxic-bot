@@ -1,8 +1,9 @@
 use signal_bot::llm::{MockLlm, Relevance};
+use signal_bot::metrics::Metrics;
 use signal_bot::personalities::Personalities;
 use signal_bot::router::Router;
 use signal_bot::signal::MockSignal;
-use signal_bot::store::Store;
+use signal_bot::store::{SettingsRow, Store};
 use signal_bot::types::{IncomingMessage, ReplyMode};
 use std::sync::Arc;
 use std::io::Write;
@@ -16,6 +17,26 @@ fn personalities() -> Arc<Personalities> {
     p
 }
 
+/// Seed a valid default settings row (Global-Constraints defaults) so that
+/// `store.get_settings()` succeeds in the fresh in-memory stores these tests use.
+async fn seed_settings(store: &Store) {
+    store
+        .upsert_settings(&SettingsRow {
+            keep_alive: "30m".into(),
+            ollama_timeout_secs: 300,
+            repeat_penalty: 1.3,
+            repeat_last_n: 256,
+            num_predict: 512,
+            num_ctx: 8192,
+            default_temperature: 0.7,
+            default_top_p: 0.9,
+            summary_enabled: true,
+            summary_interval_hours: 6,
+        })
+        .await
+        .unwrap();
+}
+
 fn incoming(room: &str, group: bool, mention: bool) -> IncomingMessage {
     IncomingMessage { room_id: room.into(), sender_id: "+1000".into(), sender_name: Some("Alice".into()),
         body: "hello bot".into(), is_group: group, is_mention: mention, quoted_msg: None, timestamp: 1 }
@@ -24,9 +45,10 @@ fn incoming(room: &str, group: bool, mention: bool) -> IncomingMessage {
 #[tokio::test]
 async fn direct_message_gets_reply_and_is_sent() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
+    seed_settings(&store).await;
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "hi there".into(), relevance: Relevance{should_reply:false, confidence:0.0} });
-    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false);
+    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None);
 
     let out = r.handle(incoming("+1000", false, false)).await.unwrap();
     assert_eq!(out.as_deref(), Some("hi there"));
@@ -38,9 +60,10 @@ async fn direct_message_gets_reply_and_is_sent() {
 #[tokio::test]
 async fn group_addressed_silent_without_mention() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
+    seed_settings(&store).await;
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "x".into(), relevance: Relevance{should_reply:true, confidence:1.0} });
-    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false);
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None);
     let out = r.handle(incoming("G", true, false)).await.unwrap();
     assert!(out.is_none());
     assert!(sig.sent.lock().unwrap().is_empty());
@@ -49,11 +72,12 @@ async fn group_addressed_silent_without_mention() {
 #[tokio::test]
 async fn proactive_below_threshold_stays_silent() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
+    seed_settings(&store).await;
     store.ensure_room("G", Some("Grp"), true).await.unwrap();
     store.set_reply_mode("G", ReplyMode::Proactive).await.unwrap();
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "x".into(), relevance: Relevance{should_reply:true, confidence:0.5} });
-    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false);
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None);
     let out = r.handle(incoming("G", true, false)).await.unwrap();
     assert!(out.is_none()); // 0.5 < 0.7 threshold
     assert!(sig.sent.lock().unwrap().is_empty());
@@ -62,11 +86,12 @@ async fn proactive_below_threshold_stays_silent() {
 #[tokio::test]
 async fn dry_run_proactive_does_not_consume_rate_limit() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
+    seed_settings(&store).await;
     store.ensure_room("G", Some("Grp"), true).await.unwrap();
     store.set_reply_mode("G", ReplyMode::Proactive).await.unwrap();
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "would say".into(), relevance: Relevance{should_reply:true, confidence:1.0} });
-    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), true);
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), true, Metrics::new(), None);
 
     let out1 = r.handle(incoming("G", true, false)).await.unwrap();
     let out2 = r.handle(incoming("G", true, false)).await.unwrap();
@@ -81,9 +106,10 @@ async fn dry_run_proactive_does_not_consume_rate_limit() {
 #[tokio::test]
 async fn self_sent_message_is_ignored() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
+    seed_settings(&store).await;
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "should not be used".into(), relevance: Relevance{should_reply:true, confidence:1.0} });
-    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false);
+    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), None);
 
     let mut msg = incoming("+1000", false, false);
     msg.sender_id = "+bot".into();
@@ -98,10 +124,46 @@ async fn self_sent_message_is_ignored() {
 #[tokio::test]
 async fn dry_run_produces_reply_but_does_not_send() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
+    seed_settings(&store).await;
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(MockLlm { reply: "would say".into(), relevance: Relevance{should_reply:false, confidence:0.0} });
-    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), true);
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), true, Metrics::new(), None);
     let out = r.handle(incoming("+1000", false, false)).await.unwrap();
     assert_eq!(out.as_deref(), Some("would say"));
     assert!(sig.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn direct_reply_records_one_metrics_reply() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    seed_settings(&store).await;
+    let sig = Arc::new(MockSignal::new());
+    let llm = Arc::new(MockLlm { reply: "hi there".into(), relevance: Relevance{should_reply:false, confidence:0.0} });
+    let metrics = Metrics::new();
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, metrics.clone(), None);
+
+    let out = r.handle(incoming("+1000", false, false)).await.unwrap();
+    assert_eq!(out.as_deref(), Some("hi there"));
+    assert_eq!(metrics.snapshot().replies, 1);
+}
+
+#[tokio::test]
+async fn dm_reply_publishes_bot_sse_event() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    seed_settings(&store).await;
+    let sig = Arc::new(MockSignal::new());
+    let llm = Arc::new(MockLlm { reply: "hi there".into(), relevance: Relevance{should_reply:false, confidence:0.0} });
+    let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+    let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false, Metrics::new(), Some(tx));
+
+    let out = r.handle(incoming("+1000", false, false)).await.unwrap();
+    assert_eq!(out.as_deref(), Some("hi there"));
+
+    // First event is the incoming user message; second is the bot's reply.
+    let evt1 = rx.try_recv().unwrap();
+    assert_eq!(evt1.sender, "Alice");
+    let evt2 = rx.try_recv().unwrap();
+    assert_eq!(evt2.sender, "bot");
+    assert_eq!(evt2.body, "hi there");
+    assert_eq!(evt2.room_id, "+1000");
 }

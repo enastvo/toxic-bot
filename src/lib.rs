@@ -1,11 +1,15 @@
 pub mod types;
-pub mod window;
+pub mod context;
 pub mod store;
 pub mod personalities;
 pub mod personalities_watch;
 pub mod repl;
+pub mod settings;
 pub mod llm;
 pub mod signal;
 pub mod router;
+pub mod orchestrator;
 pub mod config;
 pub mod web;
+pub mod metrics;
+pub mod summarizer;

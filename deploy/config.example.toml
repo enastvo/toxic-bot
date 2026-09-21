@@ -12,3 +12,17 @@ cert_path = "/etc/signal-bot/tls/bot.local.crt"
 key_path  = "/etc/signal-bot/tls/bot.local.key"
 debug = false
 dry_run = false
+
+# --- Optional: seed defaults for the `settings` table (row id=1) ---
+# These populate the DB-backed settings on first run (admin UI can change them
+# afterward). All are optional; the commented-out values below are the defaults.
+# keep_alive = "30m"
+# ollama_timeout_secs = 300
+# repeat_penalty = 1.3
+# repeat_last_n = 256
+# num_predict = 512
+# num_ctx = 8192
+# default_temperature = 0.7
+# default_top_p = 0.9
+# summary_enabled = true
+# summary_interval_hours = 6
