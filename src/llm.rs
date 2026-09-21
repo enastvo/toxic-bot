@@ -63,6 +63,7 @@ pub struct GenStats { pub prompt_tokens: u32, pub reply_tokens: u32, pub total_m
 pub trait LlmBackend: Send + Sync {
     async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<(String, GenStats)>;
     async fn relevance_check(&self, model: &str, num_ctx: u32, turns: Vec<ChatTurn>) -> anyhow::Result<Relevance>;
+    async fn summarize(&self, model: &str, prior: &str, transcript: &str) -> anyhow::Result<String>;
 }
 
 pub struct MockLlm { pub reply: String, pub relevance: Relevance }
@@ -70,6 +71,7 @@ pub struct MockLlm { pub reply: String, pub relevance: Relevance }
 impl LlmBackend for MockLlm {
     async fn generate_reply(&self, _req: ChatRequest) -> anyhow::Result<(String, GenStats)> { Ok((self.reply.clone(), GenStats::default())) }
     async fn relevance_check(&self, _m: &str, _c: u32, _t: Vec<ChatTurn>) -> anyhow::Result<Relevance> { Ok(self.relevance) }
+    async fn summarize(&self, _model: &str, _prior: &str, _transcript: &str) -> anyhow::Result<String> { Ok("[mock summary]".to_string()) }
 }
 
 /// A model reported as currently loaded by Ollama's `/api/ps`.
@@ -147,6 +149,13 @@ const RELEVANCE_SYS: &str = "You decide whether the assistant should chime in UN
 Reply with ONLY a JSON object: {\"should_reply\": bool, \"confidence\": number 0..1}. \
 Set should_reply true only if the assistant can add clear value right now.";
 
+/// Neutral summarization prompt (spec §9) — deliberately NOT a room's personality
+/// voice. Used to maintain the running per-room summary (topics, running jokes,
+/// notable facts, who tends to say what) that gets merged with new messages.
+const SUMMARY_SYS: &str = "Update the running summary of this group chat: ongoing topics, \
+running jokes, notable facts, and who tends to say what. Merge the new messages into the \
+prior summary. Keep it under ~200 words. Be neutral and factual.";
+
 #[async_trait]
 impl LlmBackend for OllamaClient {
     async fn generate_reply(&self, req: ChatRequest) -> anyhow::Result<(String, GenStats)> {
@@ -169,6 +178,25 @@ impl LlmBackend for OllamaClient {
         let v: serde_json::Value = resp.json().await?;
         let raw = v["message"]["content"].as_str().unwrap_or_default().trim();
         Ok(parse_relevance(raw))
+    }
+
+    async fn summarize(&self, model: &str, prior: &str, transcript: &str) -> anyhow::Result<String> {
+        let user_content = format!("Prior summary:\n{prior}\n\nNew messages:\n{transcript}");
+        let msgs = vec![
+            serde_json::json!({"role":"system","content": SUMMARY_SYS}),
+            serde_json::json!({"role":"user","content": user_content}),
+        ];
+        let req = ChatRequest {
+            model: model.to_string(), system: SUMMARY_SYS.to_string(), turns: vec![],
+            temperature: 0.3, top_p: 0.9, num_ctx: 8192,
+            repeat_penalty: 1.3, repeat_last_n: 256, num_predict: 300, keep_alive: "30m".to_string(),
+        };
+        let body = build_chat_body(model, &msgs, &req);
+        let resp = self.http.post(format!("{}/api/chat", self.base_url))
+            .json(&body).send().await?.error_for_status()?;
+        let v: serde_json::Value = resp.json().await?;
+        let content = v["message"]["content"].as_str().unwrap_or_default().trim();
+        Ok(sanitize(content))
     }
 }
 
