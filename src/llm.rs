@@ -1,6 +1,6 @@
 use crate::types::ChatTurn;
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
@@ -72,6 +72,37 @@ impl LlmBackend for MockLlm {
     async fn relevance_check(&self, _m: &str, _c: u32, _t: Vec<ChatTurn>) -> anyhow::Result<Relevance> { Ok(self.relevance) }
 }
 
+/// A model reported as currently loaded by Ollama's `/api/ps`.
+#[derive(Debug, Clone, Serialize)]
+pub struct OllamaModel {
+    pub name: String,
+    pub size_bytes: u64,
+    pub expires_at: Option<String>,
+}
+
+/// Response of `GET /api/ps`: the models Ollama currently has loaded in memory.
+#[derive(Debug, Clone, Serialize)]
+pub struct OllamaPs {
+    pub models: Vec<OllamaModel>,
+}
+
+/// Raw wire shape of a single model entry from Ollama's `/api/ps` response.
+#[derive(Debug, Deserialize)]
+struct RawOllamaModel {
+    name: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    expires_at: Option<String>,
+}
+
+/// Raw wire shape of `/api/ps`'s top-level response.
+#[derive(Debug, Deserialize)]
+struct RawOllamaPs {
+    #[serde(default)]
+    models: Vec<RawOllamaModel>,
+}
+
 pub struct OllamaClient { base_url: String, http: reqwest::Client }
 
 impl OllamaClient {
@@ -94,6 +125,21 @@ impl OllamaClient {
         let content = v["message"]["content"].as_str().unwrap_or_default().trim();
         let stats = parse_gen_stats(&v);
         Ok((sanitize(content), stats))
+    }
+
+    /// GET `/api/ps` — the models Ollama currently has loaded. Callers (Task 17's
+    /// health handler) degrade to `reachable: false` on `Err`.
+    pub async fn ps(&self) -> anyhow::Result<OllamaPs> {
+        let resp = self.http.get(format!("{}/api/ps", self.base_url))
+            .send().await?.error_for_status()?;
+        let raw: RawOllamaPs = resp.json().await?;
+        Ok(OllamaPs {
+            models: raw.models.into_iter().map(|m| OllamaModel {
+                name: m.name,
+                size_bytes: m.size,
+                expires_at: m.expires_at,
+            }).collect(),
+        })
     }
 }
 

@@ -1,5 +1,7 @@
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 const RING_CAP: usize = 500;
 const ONE_HOUR_MS: i64 = 3_600_000;
@@ -58,16 +60,22 @@ pub struct MetricsSnapshot {
 /// In-memory store of recent turn records with response-time aggregates.
 pub struct Metrics {
     inner: Mutex<Ring>,
+    start: Instant,
 }
 
 impl Metrics {
     pub fn new() -> Arc<Metrics> {
-        Arc::new(Metrics { inner: Mutex::new(Ring::new()) })
+        Arc::new(Metrics { inner: Mutex::new(Ring::new()), start: Instant::now() })
     }
 
     pub fn record(&self, r: TurnRecord) {
         let mut ring = self.inner.lock().unwrap();
         ring.push(r);
+    }
+
+    /// Seconds since this `Metrics` instance (i.e. the bot process) started.
+    pub fn uptime_secs(&self) -> u64 {
+        self.start.elapsed().as_secs()
     }
 
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -157,6 +165,79 @@ fn token_averages(records: &[&TurnRecord]) -> (u32, u32, f32) {
     let avg_tokens_per_sec = tps_sum / n as f32;
 
     (avg_prompt_tokens, avg_reply_tokens, avg_tokens_per_sec)
+}
+
+/// Point-in-time system + process resource snapshot for the health view.
+/// `uptime_secs` is left at 0 by `system_snapshot()`; the caller (Task 17's
+/// handler) fills it in from `Metrics::uptime_secs()`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemSnapshot {
+    pub mem_total_kb: u64,
+    pub mem_available_kb: u64,
+    pub load1: f32,
+    pub rss_kb: u64,
+    pub uptime_secs: u64,
+}
+
+/// Parse MemTotal/MemAvailable (in kB) out of a `/proc/meminfo`-formatted string.
+/// Missing lines default to 0; never panics on malformed input.
+fn parse_meminfo(sample: &str) -> (u64, u64) {
+    let mut total = 0u64;
+    let mut available = 0u64;
+    for line in sample.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            total = parse_kb_value(rest);
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            available = parse_kb_value(rest);
+        }
+    }
+    (total, available)
+}
+
+/// Parse the numeric value out of a `/proc/meminfo` field's remainder, e.g.
+/// `"  16384000 kB"` -> 16384000. Defaults to 0 on malformed input.
+fn parse_kb_value(rest: &str) -> u64 {
+    rest.split_whitespace()
+        .next()
+        .and_then(|tok| tok.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Parse the 1-minute load average (first whitespace-separated token) out of a
+/// `/proc/loadavg`-formatted string. Defaults to 0.0 on malformed/empty input.
+fn parse_loadavg(sample: &str) -> f32 {
+    sample
+        .split_whitespace()
+        .next()
+        .and_then(|tok| tok.parse::<f32>().ok())
+        .unwrap_or(0.0)
+}
+
+/// Parse VmRSS (in kB) out of a `/proc/self/status`-formatted string.
+/// Defaults to 0 when the line is missing or malformed.
+fn parse_vmrss(sample: &str) -> u64 {
+    for line in sample.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            return parse_kb_value(rest);
+        }
+    }
+    0
+}
+
+/// Read `/proc/meminfo`, `/proc/loadavg`, and this process's RSS from
+/// `/proc/self/status`, degrading to 0 on any read failure (never panics).
+/// `uptime_secs` is left at 0 — the caller fills it from `Metrics::uptime_secs()`.
+pub fn system_snapshot() -> SystemSnapshot {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let (mem_total_kb, mem_available_kb) = parse_meminfo(&meminfo);
+
+    let loadavg = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
+    let load1 = parse_loadavg(&loadavg);
+
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let rss_kb = parse_vmrss(&status);
+
+    SystemSnapshot { mem_total_kb, mem_available_kb, load1, rss_kb, uptime_secs: 0 }
 }
 
 #[cfg(test)]
@@ -262,5 +343,44 @@ mod tests {
         // oldest 100 (gen_ms 0..100) should have been dropped; first remaining is 100
         assert_eq!(snap.recent.first().unwrap().gen_ms, 100);
         assert_eq!(snap.recent.last().unwrap().gen_ms, 599);
+    }
+
+    #[test]
+    fn parse_meminfo_extracts_total_and_available() {
+        let sample = "\
+MemTotal:       16384000 kB
+MemFree:         2048000 kB
+MemAvailable:    8192000 kB
+Buffers:          512000 kB
+Cached:          1024000 kB
+";
+        let (total, available) = parse_meminfo(sample);
+        assert_eq!(total, 16384000);
+        assert_eq!(available, 8192000);
+    }
+
+    #[test]
+    fn parse_meminfo_defaults_missing_lines_to_zero() {
+        let sample = "SomeOtherField: 123 kB\n";
+        let (total, available) = parse_meminfo(sample);
+        assert_eq!(total, 0);
+        assert_eq!(available, 0);
+    }
+
+    #[test]
+    fn parse_loadavg_extracts_first_token() {
+        let sample = "0.50 0.40 0.30 1/234 5678";
+        assert!((parse_loadavg(sample) - 0.50).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_loadavg_defaults_to_zero_on_empty() {
+        assert_eq!(parse_loadavg(""), 0.0);
+    }
+
+    #[test]
+    fn metrics_uptime_secs_starts_near_zero() {
+        let m = Metrics::new();
+        assert!(m.uptime_secs() < 2);
     }
 }
