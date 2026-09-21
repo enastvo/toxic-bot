@@ -35,6 +35,7 @@
 
 use crate::router::Router;
 use crate::types::IncomingMessage;
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -71,6 +72,25 @@ impl TurnHandler for Router {
     }
 }
 
+/// A single in-flight generation: which room, and how long it has been
+/// running (for Task 17's health view).
+#[derive(Debug, Clone, Serialize)]
+pub struct InFlight {
+    pub room: String,
+    pub elapsed_ms: u64,
+}
+
+/// Point-in-time orchestration gauges, read by Task 17's `/api/metrics`.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct DispatcherGauges {
+    pub in_flight: Option<InFlight>,
+    /// Best-effort per-room buffered-message counts. Left empty in v1: tokio's
+    /// `mpsc::Sender`/`Receiver` expose no way to observe the current number
+    /// of buffered items, so there is nothing cheap/accurate to report here.
+    pub per_room_buffered: Vec<(String, usize)>,
+    pub active_actors: usize,
+}
+
 /// Routes incoming messages to per-room actors and owns the single global
 /// inference permit.
 pub struct Dispatcher {
@@ -78,6 +98,12 @@ pub struct Dispatcher {
     handler: Arc<dyn TurnHandler>,
     permit: Arc<Semaphore>,
     idle: Duration,
+    /// Marker for the room+start-time of the generation currently holding the
+    /// global permit, if any. Shared with every `RoomActor` so `gauges()` can
+    /// report it without touching the permit itself. Set (lock/write/drop)
+    /// immediately after acquiring the permit and cleared (lock/write/drop)
+    /// right after `handle_burst` returns — never held across an `.await`.
+    in_flight: Arc<Mutex<Option<(String, Instant)>>>,
 }
 
 impl Dispatcher {
@@ -94,6 +120,7 @@ impl Dispatcher {
             handler,
             permit: Arc::new(Semaphore::new(1)),
             idle,
+            in_flight: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -107,6 +134,18 @@ impl Dispatcher {
     /// Number of rooms with a currently-live actor. Primarily for tests/metrics.
     pub fn active_rooms(&self) -> usize {
         self.rooms.lock().unwrap().len()
+    }
+
+    /// Point-in-time orchestration gauges for Task 17's health view.
+    pub fn gauges(&self) -> DispatcherGauges {
+        let active_actors = self.rooms.lock().unwrap().len();
+        let in_flight = self
+            .in_flight
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(room, since)| InFlight { room: room.clone(), elapsed_ms: since.elapsed().as_millis() as u64 });
+        DispatcherGauges { in_flight, per_room_buffered: vec![], active_actors }
     }
 
     /// Deliver `msg` to its room's actor, spawning one if needed. If the actor
@@ -161,6 +200,7 @@ impl Dispatcher {
             idle: self.idle,
             dispatcher: Arc::downgrade(self),
             last_processed_ts: None,
+            in_flight: self.in_flight.clone(),
         };
         tokio::spawn(actor.run());
         tx
@@ -182,6 +222,9 @@ struct RoomActor {
     dispatcher: Weak<Dispatcher>,
     /// Max timestamp already handled; anything at or below it is a duplicate.
     last_processed_ts: Option<i64>,
+    /// Shared with the [`Dispatcher`] (see its field doc); set around
+    /// `handle_burst` so `gauges()` can report the in-flight room + elapsed.
+    in_flight: Arc<Mutex<Option<(String, Instant)>>>,
 }
 
 impl RoomActor {
@@ -272,7 +315,19 @@ impl RoomActor {
         // drained on the next loop iteration (coalesced).
         match self.permit.acquire().await {
             Ok(_permit) => {
-                if let Err(e) = self.handler.handle_burst(batch, wait_ms).await {
+                // Mark in-flight immediately after acquiring the permit and
+                // before awaiting handle_burst; clear it right after, in both
+                // outcomes. Lock/set/drop — never held across the await.
+                {
+                    let mut inf = self.in_flight.lock().unwrap();
+                    *inf = Some((self.room_id.clone(), Instant::now()));
+                }
+                let result = self.handler.handle_burst(batch, wait_ms).await;
+                {
+                    let mut inf = self.in_flight.lock().unwrap();
+                    *inf = None;
+                }
+                if let Err(e) = result {
                     // Log, don't crash the actor.
                     tracing::error!(room = %self.room_id, error = %e, "handle_burst failed");
                 }

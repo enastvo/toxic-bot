@@ -1,6 +1,6 @@
 use clap::Parser;
 use signal_bot::config::{AppConfig, Cli};
-use signal_bot::llm::OllamaClient;
+use signal_bot::llm::{LlmBackend, OllamaClient};
 use signal_bot::metrics::Metrics;
 use signal_bot::orchestrator::Dispatcher;
 use signal_bot::personalities::Personalities;
@@ -8,7 +8,7 @@ use signal_bot::router::Router;
 use signal_bot::signal::SignalCli;
 use signal_bot::store::Store;
 use signal_bot::web::{self, AppState};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -47,8 +47,27 @@ async fn main() -> anyhow::Result<()> {
     let personalities = Arc::new(Personalities::load_dir(&cfg.personalities_dir)?);
     let dry_run = cli.dry_run || cfg.dry_run;
 
+    // Metrics + the Ollama client are created early (before the web server)
+    // and shared with the Router built later, so `/api/metrics` and the
+    // actual generation path report on the exact same instances.
+    let timeout = store.get_settings().await?.ollama_timeout_secs as u64;
+    let metrics = Metrics::new();
+    let ollama = Arc::new(OllamaClient::new(cfg.ollama_url.clone(), timeout));
+
+    // The Dispatcher doesn't exist yet at this point (it needs `SignalCli` and
+    // the `Router`, built further below), but the web server is spawned now.
+    // This cell lets `/api/metrics` read dispatcher gauges once it's ready,
+    // reporting empty gauges in the meantime.
+    let dispatcher_cell: Arc<OnceLock<Arc<Dispatcher>>> = Arc::new(OnceLock::new());
+
     // web state + server
-    let state = AppState::new(store.clone(), personalities.clone());
+    let state = AppState::new(
+        store.clone(),
+        personalities.clone(),
+        metrics.clone(),
+        ollama.clone(),
+        dispatcher_cell.clone(),
+    );
     {
         let (bind, cert, key, st) = (
             cfg.bind_addr.clone(),
@@ -79,20 +98,18 @@ async fn main() -> anyhow::Result<()> {
         &cfg.data_dir,
     )
     .await?;
-    let timeout = store.get_settings().await?.ollama_timeout_secs as u64;
-    let llm = Arc::new(OllamaClient::new(cfg.ollama_url.clone(), timeout));
-    let metrics = Metrics::new();
     let router = Arc::new(Router::new(
         store,
         personalities.clone(),
-        llm,
+        ollama.clone() as Arc<dyn LlmBackend>,
         signal,
         cfg.signal_account.clone(),
         dry_run,
-        metrics,
+        metrics.clone(),
         Some(state.tx.clone()),
     ));
     let dispatcher = Dispatcher::new(router);
+    let _ = dispatcher_cell.set(dispatcher.clone());
 
     // hot-reload watcher
     signal_bot::personalities_watch::spawn(personalities.clone(), cfg.personalities_dir.clone());

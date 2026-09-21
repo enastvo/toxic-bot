@@ -1,10 +1,12 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use signal_bot::llm::OllamaClient;
+use signal_bot::metrics::Metrics;
 use signal_bot::personalities::Personalities;
 use signal_bot::store::{SettingsRow, Store};
 use signal_bot::web::{build_router, AppState};
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
 
 fn default_settings() -> SettingsRow {
@@ -32,7 +34,8 @@ async fn state() -> (AppState, Store) {
     let p = Arc::new(Personalities::load_dir(d.path()).unwrap());
     std::mem::forget(d);
     let st = store.clone();
-    (AppState::new(store, p), st)
+    let ollama = Arc::new(OllamaClient::new("http://127.0.0.1:0", 300));
+    (AppState::new(store, p, Metrics::new(), ollama, Arc::new(OnceLock::new())), st)
 }
 
 /// Extract the `Set-Cookie` header value (name=value only, no attributes)
@@ -126,6 +129,43 @@ async fn post_settings_valid_updates_store_and_redirects() {
 
     let row = store.get_settings().await.unwrap();
     assert_eq!(row.num_predict, 1024);
+}
+
+#[tokio::test]
+async fn get_api_metrics_authed_returns_json_with_expected_keys() {
+    let (state, _store) = state().await;
+    let app = build_router(state);
+    let cookie = login_cookie(app.clone()).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/metrics")
+                .header(axum::http::header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .expect("content-type header present")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(content_type.starts_with("application/json"), "content-type was: {content_type}");
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.get("system").is_some(), "missing 'system' key: {json}");
+    assert!(json.get("ollama").is_some(), "missing 'ollama' key: {json}");
+    assert!(json.get("llm").is_some(), "missing 'llm' key: {json}");
+    assert!(json.get("orchestration").is_some(), "missing 'orchestration' key: {json}");
+    // No real Ollama in the test env: `ps()` against 127.0.0.1:0 must fail and
+    // degrade gracefully rather than error the handler.
+    assert_eq!(json["ollama"]["reachable"], serde_json::json!(false));
 }
 
 #[tokio::test]

@@ -3,6 +3,9 @@
 pub mod auth;
 pub mod handlers;
 
+use crate::llm::OllamaClient;
+use crate::metrics::Metrics;
+use crate::orchestrator::Dispatcher;
 use crate::personalities::Personalities;
 use crate::store::Store;
 use axum::middleware;
@@ -10,7 +13,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use time::Duration;
 use tokio::sync::broadcast;
 use tower_sessions::cookie::SameSite;
@@ -31,12 +34,33 @@ pub struct AppState {
     pub personalities: Arc<Personalities>,
     pub tx: broadcast::Sender<SseEvent>,
     pub(crate) login_limiter: Arc<auth::LoginLimiter>,
+    pub metrics: Arc<Metrics>,
+    pub ollama: Arc<OllamaClient>,
+    /// Filled in once `main` builds the `Dispatcher` (which itself needs a
+    /// `Router` that in turn needs signal/LLM wiring built up later than the
+    /// web server is spawned). `/api/metrics` reads through this cell and
+    /// reports empty orchestration gauges until it is set.
+    pub dispatcher: Arc<OnceLock<Arc<Dispatcher>>>,
 }
 
 impl AppState {
-    pub fn new(store: Store, personalities: Arc<Personalities>) -> Self {
+    pub fn new(
+        store: Store,
+        personalities: Arc<Personalities>,
+        metrics: Arc<Metrics>,
+        ollama: Arc<OllamaClient>,
+        dispatcher: Arc<OnceLock<Arc<Dispatcher>>>,
+    ) -> Self {
         let (tx, _rx) = broadcast::channel(256);
-        Self { store, personalities, tx, login_limiter: Arc::new(auth::LoginLimiter::default()) }
+        Self {
+            store,
+            personalities,
+            tx,
+            login_limiter: Arc::new(auth::LoginLimiter::default()),
+            metrics,
+            ollama,
+            dispatcher,
+        }
     }
 }
 
@@ -61,6 +85,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rooms/:id/mode", post(handlers::set_mode))
         .route("/settings", get(handlers::settings_page).post(handlers::settings_submit))
         .route("/events", get(handlers::sse_events))
+        .route("/health", get(handlers::health_page))
+        .route("/api/metrics", get(handlers::api_metrics))
         .route_layer(middleware::from_fn(auth::require_admin));
 
     Router::new()

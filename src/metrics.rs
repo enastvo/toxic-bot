@@ -11,7 +11,7 @@ fn now_ms() -> i64 {
 }
 
 /// A single recorded turn (one message processed by the bot).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TurnRecord {
     pub room_id: String,
     pub ts: i64,
@@ -42,7 +42,7 @@ impl Ring {
 }
 
 /// Aggregated view over the metrics ring, computed at snapshot time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MetricsSnapshot {
     pub replies: u64,
     pub errors: u64,

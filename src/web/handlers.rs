@@ -2,6 +2,7 @@
 
 use super::auth::{self, LoginLimiter};
 use super::{AppState, SseEvent};
+use crate::metrics;
 use crate::settings;
 use crate::store::SettingsRow;
 use crate::types::ReplyMode;
@@ -10,9 +11,10 @@ use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::Form;
+use axum::{Form, Json};
 use futures::stream::Stream;
 use serde::Deserialize;
+use serde_json::json;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::sync::broadcast;
@@ -61,6 +63,10 @@ struct RoomTemplate {
     mode_always: bool,
     mode_proactive: bool,
 }
+
+#[derive(Template)]
+#[template(path = "health.html")]
+struct HealthTemplate;
 
 #[derive(Template)]
 #[template(path = "settings.html")]
@@ -345,6 +351,39 @@ pub async fn settings_submit(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     Redirect::to("/settings?saved=1").into_response()
+}
+
+// ---- health / metrics ----------------------------------------------------------
+
+pub async fn health_page() -> Response {
+    html(HealthTemplate.render().unwrap())
+}
+
+/// `GET /api/metrics`: a snapshot combining system resources, Ollama's loaded
+/// models, the LLM turn-metrics ring, and the dispatcher's orchestration
+/// gauges. Degrades gracefully: an unreachable Ollama or a not-yet-built
+/// dispatcher (the web server starts before the dispatcher does, see `main`)
+/// never fails the request, they just report as absent/empty.
+pub async fn api_metrics(State(state): State<AppState>) -> Response {
+    let mut system = metrics::system_snapshot();
+    system.uptime_secs = state.metrics.uptime_secs();
+
+    let llm = state.metrics.snapshot();
+
+    let ollama = match state.ollama.ps().await {
+        Ok(ps) => json!({"reachable": true, "models": ps.models}),
+        Err(_) => json!({"reachable": false}),
+    };
+
+    let orchestration = state.dispatcher.get().map(|d| d.gauges()).unwrap_or_default();
+
+    Json(json!({
+        "system": system,
+        "ollama": ollama,
+        "llm": llm,
+        "orchestration": orchestration,
+    }))
+    .into_response()
 }
 
 // ---- SSE ----------------------------------------------------------
