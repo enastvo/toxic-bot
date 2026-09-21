@@ -7,6 +7,7 @@ use signal_bot::personalities::Personalities;
 use signal_bot::router::Router;
 use signal_bot::signal::SignalCli;
 use signal_bot::store::Store;
+use signal_bot::summarizer;
 use signal_bot::web::{self, AppState};
 use std::sync::{Arc, OnceLock};
 
@@ -99,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let router = Arc::new(Router::new(
-        store,
+        store.clone(),
         personalities.clone(),
         ollama.clone() as Arc<dyn LlmBackend>,
         signal,
@@ -113,6 +114,16 @@ async fn main() -> anyhow::Result<()> {
 
     // hot-reload watcher
     signal_bot::personalities_watch::spawn(personalities.clone(), cfg.personalities_dir.clone());
+
+    // Per-room summarization sweep: shares the dispatcher's global inference
+    // permit so a sweep never competes with a user-facing generation for the
+    // model (it just waits its turn). Settings-gated.
+    let settings = store.get_settings().await?;
+    if settings.summary_enabled {
+        let model = personalities.get_or_default(None).model.clone();
+        let interval = std::time::Duration::from_secs((settings.summary_interval_hours.max(1) as u64) * 3600);
+        summarizer::spawn(store.clone(), ollama.clone() as Arc<dyn LlmBackend>, model, dispatcher.inference_permit(), interval);
+    }
 
     // receive loop: hand off to the dispatcher, which routes each message to
     // its room's actor (coalescing bursts, serializing generation behind the

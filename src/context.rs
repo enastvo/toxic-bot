@@ -59,6 +59,27 @@ like \"[Alice]: text\". Multiple different people may be talking here — never 
 person's words or intentions to another; keep each speaker's statements attached to their own label."
 }
 
+/// Approximate cap (in characters) for the long-term summary note, standing
+/// in for a ~250-token budget (roughly 4 chars/token).
+const SUMMARY_CHAR_CAP: usize = 1000;
+
+/// Build a token-capped system note carrying the room's rolling long-term
+/// summary, for injection ahead of the personality's system prompt. Returns
+/// `None` when the summary is empty (nothing to inject).
+pub fn summary_block(summary: &str) -> Option<String> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let body = if trimmed.chars().count() > SUMMARY_CHAR_CAP {
+        let truncated: String = trimmed.chars().take(SUMMARY_CHAR_CAP).collect();
+        format!("{truncated}…")
+    } else {
+        trimmed.to_string()
+    };
+    Some(format!("Earlier in this room: {body}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +108,28 @@ mod tests {
     fn respects_max_window() {
         let v: Vec<_> = (0..40).map(|i| m(i, "Alice", Role::User, "x")).collect();
         assert_eq!(build_context_turns(&v, "+bot").len(), MAX_WINDOW_MSGS);
+    }
+
+    #[test]
+    fn summary_block_empty_is_none() {
+        assert!(summary_block("").is_none());
+        assert!(summary_block("   ").is_none());
+    }
+
+    #[test]
+    fn summary_block_truncates_long_summary() {
+        let long = "word ".repeat(1000); // way over the ~250-token / 1000-char cap
+        let s = summary_block(&long).unwrap();
+        assert!(s.starts_with("Earlier in this room:"));
+        // capped: total length should be bounded well under the raw input's length.
+        assert!(s.len() < long.len());
+        assert!(s.ends_with('…'));
+    }
+
+    #[test]
+    fn summary_block_normal_summary() {
+        let s = summary_block("Alice and Bob discussed pizza toppings.").unwrap();
+        assert!(s.contains("Earlier in this room:"));
+        assert!(s.contains("pizza toppings"));
     }
 }

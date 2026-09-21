@@ -99,6 +99,16 @@ pub fn system_prompt(personality: &Personality, room: &Room) -> String {
     )
 }
 
+/// Compose the full system prompt, prepending the room's long-term summary
+/// note (if any/non-empty) ahead of the personality's system prompt.
+pub(crate) fn compose_system(personality: &Personality, room: &Room, summary: Option<&str>) -> String {
+    let base = system_prompt(personality, room);
+    match summary.and_then(crate::context::summary_block) {
+        Some(note) => format!("{note}\n\n{base}"),
+        None => base,
+    }
+}
+
 pub struct Router {
     store: Store,
     personalities: Arc<Personalities>,
@@ -202,9 +212,10 @@ impl Router {
 
         let dstr = decision_str(decision);
 
+        let room_summary = self.store.get_summary(&room.room_id).await?;
         let gen = self.llm.generate_reply(ChatRequest {
             model: personality.model.clone(),
-            system: system_prompt(&personality, &room),
+            system: compose_system(&personality, &room, room_summary.as_ref().map(|s| s.summary.as_str())),
             turns,
             temperature: eff.temperature,
             top_p: eff.top_p,
@@ -260,7 +271,7 @@ impl Router {
 
 #[cfg(test)]
 mod tests {
-    use super::{Decision, RateLimiter, decide, system_prompt};
+    use super::{Decision, RateLimiter, decide, system_prompt, compose_system};
     use crate::types::{Room, ReplyMode, IncomingMessage};
     use crate::personalities::{Personality, ProactiveConfig};
 
@@ -319,6 +330,42 @@ mod tests {
         assert!(s.contains("useful") && s.contains("mandatory")); // answer-mandatory rule
         assert!(s.contains("square brackets")); // speaker note
         assert!(s.contains("You are Sage.")); // character preserved
+    }
+
+    fn sample_personality() -> Personality {
+        Personality {
+            name: "sage".into(),
+            label: "Sage".into(),
+            description: None,
+            system_prompt: "You are Sage.".into(),
+            model: "qwen3:8b".into(),
+            temperature: 0.6,
+            top_p: 0.9,
+            num_ctx: 8192,
+            proactive: ProactiveConfig { relevance_threshold: 0.5, cooldown_secs: 60, max_per_hour: 4 },
+            num_predict: None,
+            num_ctx_override: None,
+            temperature_override: None,
+            top_p_override: None,
+            repeat_penalty: None,
+        }
+    }
+
+    #[test]
+    fn compose_system_includes_summary_note_when_present() {
+        let p = sample_personality();
+        let r = room(ReplyMode::Addressed, true);
+        let s = compose_system(&p, &r, Some("Alice and Bob discussed pizza toppings."));
+        assert!(s.contains("Earlier in this room:"));
+        assert!(s.contains("pizza toppings"));
+    }
+
+    #[test]
+    fn compose_system_omits_summary_note_when_none_or_empty() {
+        let p = sample_personality();
+        let r = room(ReplyMode::Addressed, true);
+        assert!(!compose_system(&p, &r, None).contains("Earlier in this room:"));
+        assert!(!compose_system(&p, &r, Some("   ")).contains("Earlier in this room:"));
     }
 
     #[test]
