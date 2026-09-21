@@ -13,3 +13,4 @@ pub mod orchestrator;
 pub mod config;
 pub mod web;
 pub mod metrics;
+pub mod summarizer;
