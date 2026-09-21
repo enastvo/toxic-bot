@@ -149,10 +149,13 @@ impl Router {
         req: &ChatRequest,
         settings: &crate::store::SettingsRow,
         room_id: &str,
+        extra_domains: &[String],
     ) -> anyhow::Result<(String, crate::llm::GenStats)> {
         let mut messages = crate::llm::base_messages(&req.system, &req.turns);
         let web_available = settings.web_search_enabled && self.search.is_some();
-        let whitelist = crate::tools::parse_whitelist(&settings.search_whitelist);
+        // Global whitelist plus this personality's own extra domains (persona
+        // sources don't leak into other personalities' searches).
+        let whitelist = crate::tools::merged_whitelist(&settings.search_whitelist, extra_domains);
         let schemas = crate::tools::tool_schemas(web_available);
         let max_rounds = settings.max_tool_rounds.max(0) as usize;
 
@@ -286,7 +289,7 @@ impl Router {
         // When tools are enabled, drive the bounded tool-call loop; otherwise a
         // single generation (unchanged behavior).
         let gen = if settings.tools_enabled {
-            self.run_tool_loop(&chatreq, &settings, &room.room_id).await
+            self.run_tool_loop(&chatreq, &settings, &room.room_id, &personality.extra_search_domains).await
         } else {
             self.llm.generate_reply(chatreq).await
         };
@@ -389,6 +392,7 @@ mod tests {
             temperature_override: None,
             top_p_override: None,
             repeat_penalty: None,
+            extra_search_domains: vec![],
         };
         let r = room(ReplyMode::Addressed, true);
         let s = system_prompt(&p, &r);
@@ -413,6 +417,7 @@ mod tests {
             temperature_override: None,
             top_p_override: None,
             repeat_penalty: None,
+            extra_search_domains: vec![],
         }
     }
 

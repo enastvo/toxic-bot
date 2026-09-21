@@ -142,6 +142,7 @@ mod tests {
             temperature_override: None,
             top_p_override: None,
             repeat_penalty: rp,
+            extra_search_domains: vec![],
         }
     }
 
