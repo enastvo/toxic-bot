@@ -13,3 +13,5 @@ pub mod config;
 pub mod web;
 pub mod metrics;
 pub mod summarizer;
+pub mod search;
+pub mod tools;

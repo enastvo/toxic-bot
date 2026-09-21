@@ -122,6 +122,9 @@ pub struct Router {
     rl: RateLimiter,
     metrics: Arc<Metrics>,
     sse: Option<tokio::sync::broadcast::Sender<crate::web::SseEvent>>,
+    /// Web-search provider for the `web_search` tool. `None` = web search
+    /// unavailable (no API key configured), regardless of the DB toggle.
+    search: Option<Arc<dyn crate::search::SearchProvider>>,
 }
 
 fn now_secs() -> u64 { time::OffsetDateTime::now_utc().unix_timestamp() as u64 }
@@ -131,8 +134,59 @@ impl Router {
     #[allow(clippy::too_many_arguments)]
     pub fn new(store: Store, personalities: Arc<Personalities>, llm: Arc<dyn LlmBackend>,
                signal: Arc<dyn SignalTransport>, bot_id: String, dry_run: bool, metrics: Arc<Metrics>,
-               sse: Option<tokio::sync::broadcast::Sender<crate::web::SseEvent>>) -> Self {
-        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default(), metrics, sse }
+               sse: Option<tokio::sync::broadcast::Sender<crate::web::SseEvent>>,
+               search: Option<Arc<dyn crate::search::SearchProvider>>) -> Self {
+        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default(), metrics, sse, search }
+    }
+
+    /// Bounded tool-call loop. Offers the model tool schemas; when it requests a
+    /// call, we validate + run it (in `tools::execute`) and feed the result back
+    /// as DATA, then continue — capped at `settings.max_tool_rounds` rounds
+    /// (each round is another generation). On the final round tools are withheld
+    /// so the model must produce text. Returns the final reply + aggregated stats.
+    async fn run_tool_loop(
+        &self,
+        req: &ChatRequest,
+        settings: &crate::store::SettingsRow,
+        room_id: &str,
+    ) -> anyhow::Result<(String, crate::llm::GenStats)> {
+        let mut messages = crate::llm::base_messages(&req.system, &req.turns);
+        let web_available = settings.web_search_enabled && self.search.is_some();
+        let whitelist = crate::tools::parse_whitelist(&settings.search_whitelist);
+        let schemas = crate::tools::tool_schemas(web_available);
+        let max_rounds = settings.max_tool_rounds.max(0) as usize;
+
+        let mut total_ms = 0u64;
+        let mut rounds = 0usize;
+        loop {
+            let offer = if rounds < max_rounds { schemas.as_slice() } else { &[] };
+            let step = self.llm.chat_step(messages.clone(), offer, req).await?;
+            total_ms += step.stats.total_ms;
+            if step.tool_calls.is_empty() {
+                let mut stats = step.stats;
+                stats.total_ms = total_ms;
+                return Ok((step.content, stats));
+            }
+            // Record the assistant's tool-call request, then each result, so the
+            // next round has the full context.
+            let tc_json: Vec<serde_json::Value> = step.tool_calls.iter().map(|tc| {
+                serde_json::json!({ "function": { "name": tc.name, "arguments": tc.arguments } })
+            }).collect();
+            messages.push(serde_json::json!({
+                "role": "assistant", "content": step.content, "tool_calls": tc_json
+            }));
+            let ctx = crate::tools::ToolCtx {
+                store: &self.store,
+                room_id,
+                search: self.search.as_deref(),
+                whitelist: &whitelist,
+            };
+            for tc in &step.tool_calls {
+                let result = crate::tools::execute(&tc.name, &tc.arguments, &ctx).await;
+                messages.push(serde_json::json!({ "role": "tool", "content": result }));
+            }
+            rounds += 1;
+        }
     }
 
     /// Back-compat single-message entry point: a burst of one, with no wait.
@@ -216,7 +270,7 @@ impl Router {
         let dstr = decision_str(decision);
 
         let room_summary = self.store.get_summary(&room.room_id).await?;
-        let gen = self.llm.generate_reply(ChatRequest {
+        let chatreq = ChatRequest {
             model: personality.model.clone(),
             system: compose_system(&personality, &room, room_summary.as_ref().map(|s| s.summary.as_str())),
             turns,
@@ -228,7 +282,14 @@ impl Router {
             num_predict: eff.num_predict,
             keep_alive: eff.keep_alive.clone(),
             ollama_timeout_secs: settings.ollama_timeout_secs.max(1) as u64,
-        }).await;
+        };
+        // When tools are enabled, drive the bounded tool-call loop; otherwise a
+        // single generation (unchanged behavior).
+        let gen = if settings.tools_enabled {
+            self.run_tool_loop(&chatreq, &settings, &room.room_id).await
+        } else {
+            self.llm.generate_reply(chatreq).await
+        };
 
         let (reply, stats) = match gen {
             Ok(v) => v,

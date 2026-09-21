@@ -81,6 +81,10 @@ struct SettingsTemplate {
     default_top_p: f64,
     summary_enabled: bool,
     summary_interval_hours: i64,
+    tools_enabled: bool,
+    web_search_enabled: bool,
+    search_whitelist: String,
+    max_tool_rounds: i64,
     error: Option<String>,
     saved: bool,
 }
@@ -98,6 +102,10 @@ impl SettingsTemplate {
             default_top_p: row.default_top_p,
             summary_enabled: row.summary_enabled,
             summary_interval_hours: row.summary_interval_hours,
+            tools_enabled: row.tools_enabled,
+            web_search_enabled: row.web_search_enabled,
+            search_whitelist: row.search_whitelist.clone(),
+            max_tool_rounds: row.max_tool_rounds,
             error,
             saved,
         }
@@ -137,6 +145,12 @@ pub struct SettingsForm {
     // to bool here (anything other than the literal "true" is false).
     summary_enabled: String,
     summary_interval_hours: i64,
+    // Same <select>-as-String pattern as summary_enabled (serde's bool parser
+    // rejects HTML form values).
+    tools_enabled: String,
+    web_search_enabled: String,
+    search_whitelist: String,
+    max_tool_rounds: i64,
 }
 
 impl From<SettingsForm> for SettingsRow {
@@ -152,6 +166,10 @@ impl From<SettingsForm> for SettingsRow {
             default_top_p: f.default_top_p,
             summary_enabled: f.summary_enabled == "true",
             summary_interval_hours: f.summary_interval_hours,
+            tools_enabled: f.tools_enabled == "true",
+            web_search_enabled: f.web_search_enabled == "true",
+            search_whitelist: f.search_whitelist,
+            max_tool_rounds: f.max_tool_rounds,
         }
     }
 }

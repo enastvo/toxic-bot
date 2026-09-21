@@ -29,6 +29,13 @@ fn default_temperature() -> f64 { 0.7 }
 fn default_top_p() -> f64 { 0.9 }
 fn default_summary_enabled() -> bool { true }
 fn default_summary_interval_hours() -> i64 { 6 }
+fn default_tools_enabled() -> bool { false }
+fn default_web_search_enabled() -> bool { false }
+fn default_max_tool_rounds() -> i64 { 2 }
+/// Curated, low-malware-risk default set of domains the bot may search.
+/// Editable live from the Settings page; kept in sync with migration 0004.
+pub const DEFAULT_SEARCH_WHITELIST: &str = "wikipedia.org,wikidata.org,wiktionary.org,britannica.com,merriam-webster.com,nasa.gov,noaa.gov,weather.gov,nih.gov,ncbi.nlm.nih.gov,cdc.gov,nist.gov,who.int,arxiv.org,nature.com,science.org,reuters.com,apnews.com,bbc.com,npr.org,pbs.org,theguardian.com,economist.com,developer.mozilla.org,docs.python.org,docs.rs,stackoverflow.com,github.com,man7.org";
+fn default_search_whitelist() -> String { DEFAULT_SEARCH_WHITELIST.to_string() }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -56,6 +63,15 @@ pub struct AppConfig {
     #[serde(default = "default_top_p")] pub default_top_p: f64,
     #[serde(default = "default_summary_enabled")] pub summary_enabled: bool,
     #[serde(default = "default_summary_interval_hours")] pub summary_interval_hours: i64,
+    #[serde(default = "default_tools_enabled")] pub tools_enabled: bool,
+    #[serde(default = "default_web_search_enabled")] pub web_search_enabled: bool,
+    #[serde(default = "default_search_whitelist")] pub search_whitelist: String,
+    #[serde(default = "default_max_tool_rounds")] pub max_tool_rounds: i64,
+
+    /// Web-search provider (Tavily) API key. SECRET: kept in config.toml only
+    /// (root-owned), never stored in the DB or shown in the web UI. `None`
+    /// disables web search regardless of the DB toggle.
+    #[serde(default)] pub search_api_key: Option<String>,
 }
 
 impl AppConfig {
@@ -79,6 +95,10 @@ impl AppConfig {
             default_top_p: self.default_top_p,
             summary_enabled: self.summary_enabled,
             summary_interval_hours: self.summary_interval_hours,
+            tools_enabled: self.tools_enabled,
+            web_search_enabled: self.web_search_enabled,
+            search_whitelist: self.search_whitelist.clone(),
+            max_tool_rounds: self.max_tool_rounds,
         }
     }
 }
@@ -111,6 +131,12 @@ mod tests {
         assert_eq!(cfg.default_top_p, 0.9);
         assert!(cfg.summary_enabled);
         assert_eq!(cfg.summary_interval_hours, 6);
+        // tools default off; whitelist seeded; no API key by default
+        assert!(!cfg.tools_enabled);
+        assert!(!cfg.web_search_enabled);
+        assert_eq!(cfg.max_tool_rounds, 2);
+        assert!(cfg.search_whitelist.contains("wikipedia.org"));
+        assert!(cfg.search_api_key.is_none());
     }
 
     #[test]
