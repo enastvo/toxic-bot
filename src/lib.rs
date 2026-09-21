@@ -9,6 +9,7 @@ pub mod settings;
 pub mod llm;
 pub mod signal;
 pub mod router;
+pub mod orchestrator;
 pub mod config;
 pub mod web;
 pub mod metrics;
