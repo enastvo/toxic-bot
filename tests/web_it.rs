@@ -119,6 +119,49 @@ async fn authenticated_flow_login_view_and_assign_mode() {
     assert_eq!(room.reply_mode, ReplyMode::Proactive);
 }
 
+#[tokio::test]
+async fn set_persona_sources_updates_db_and_renders() {
+    let (state, store) = state().await;
+    let app = build_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder().method("POST").uri("/login")
+                .header(axum::http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("username=admin&password=pw")).unwrap(),
+        ).await.unwrap();
+    let cookie = session_cookie(&resp);
+
+    // POST domains for room G's current persona ("default") -> 303 + DB updated
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder().method("POST").uri("/rooms/G/persona-sources")
+                .header(axum::http::header::COOKIE, cookie.clone())
+                .header(axum::http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("domains=cnn.com%2C%20foxnews.com")).unwrap(),
+        ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        store.get_persona_domains("default").await.unwrap(),
+        vec!["cnn.com".to_string(), "foxnews.com".to_string()]
+    );
+
+    // GET /rooms/G shows the configured domains
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder().uri("/rooms/G")
+                .header(axum::http::header::COOKIE, cookie.clone())
+                .body(Body::empty()).unwrap(),
+        ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("cnn.com"), "room page should show configured sources");
+}
+
 /// Regression test: `set_mode`/`set_personality` used to build the redirect
 /// `Location` header from the raw, unvalidated `:id` path segment via
 /// `Redirect::to(&format!("/rooms/{room_id}"))`. Since `Redirect::to` panics
