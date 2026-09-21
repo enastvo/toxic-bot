@@ -1,4 +1,4 @@
-use crate::types::ChatTurn;
+use crate::types::{ChatTurn, Role};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -212,9 +212,14 @@ impl LlmBackend for OllamaClient {
 
 // helper used by both real client and prompt building
 pub(crate) fn turn_json(t: &ChatTurn) -> serde_json::Value {
+    // Prefix only *other people's* turns with their `[Name]:` label (so the model
+    // can attribute speakers in a group). The bot's OWN turns are left unlabeled:
+    // its `assistant` role already identifies them, and labeling them
+    // (`[you, as X]:`) taught the model to imitate the format and emit a
+    // `[...]:` prefix in its replies. `sanitize()` strips any residual leak.
     let content = match &t.name {
-        Some(n) => format!("{n}: {}", t.content),
-        None => t.content.clone(),
+        Some(n) if t.role == Role::User => format!("{n}: {}", t.content),
+        _ => t.content.clone(),
     };
     serde_json::json!({ "role": t.role.as_str(), "content": content })
 }
@@ -258,7 +263,25 @@ pub fn sanitize(raw: &str) -> String {
         result = result.replace("\n\n\n", "\n\n");
     }
 
-    result.trim().to_string()
+    strip_leading_speaker_label(result.trim())
+}
+
+/// Remove a single leading speaker-label prefix the model sometimes copies from
+/// the labeled context into its own reply, e.g. `"[you, as Toxic Asshole]: hi"`
+/// or `"[Zac Forristall]: hi"` -> `"hi"`. Only strips a short, single-line
+/// `[label]:` at the very start, so ordinary text that happens to contain
+/// brackets later is untouched.
+fn strip_leading_speaker_label(s: &str) -> String {
+    let t = s.trim_start();
+    if let Some(rest) = t.strip_prefix('[') {
+        if let Some(close) = rest.find("]:") {
+            let label = &rest[..close];
+            if !label.contains('\n') && label.chars().count() <= 60 {
+                return rest[close + 2..].trim_start().to_string();
+            }
+        }
+    }
+    s.to_string()
 }
 
 #[cfg(test)]
@@ -311,6 +334,23 @@ mod tests {
     #[test]
     fn sanitize_collapses_horizontal_runs_but_keeps_lines() {
         assert_eq!(sanitize("a    b\nc\t\td"), "a b\nc d");
+    }
+
+    #[test]
+    fn sanitize_strips_leading_speaker_label() {
+        // the two forms the model was leaking into replies
+        assert_eq!(
+            sanitize("[you, as Toxic Asshole]: Estefan, welcome back"),
+            "Estefan, welcome back"
+        );
+        assert_eq!(
+            sanitize("[Zac Forristall]: Aww, thanks sweetheart"),
+            "Aww, thanks sweetheart"
+        );
+        // only the leading label is removed; brackets later in the text stay
+        assert_eq!(sanitize("no label here [not a label]: keep"), "no label here [not a label]: keep");
+        // a normal reply with no label is unchanged
+        assert_eq!(sanitize("just a normal reply"), "just a normal reply");
     }
 
     #[test]

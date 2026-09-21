@@ -56,7 +56,10 @@ fn to_turn(m: &StoredMessage, bot_id: &str) -> ChatTurn {
 pub fn speaker_note() -> &'static str {
     "Messages in this conversation are labeled with the speaker's name in square brackets, \
 like \"[Alice]: text\". Multiple different people may be talking here — never attribute one \
-person's words or intentions to another; keep each speaker's statements attached to their own label."
+person's words or intentions to another; keep each speaker's statements attached to their own label. \
+These labels are for your understanding only: do NOT copy them into your reply. Write only your \
+message, with no name label or bracketed prefix of your own — address people by their name \
+naturally within your sentences."
 }
 
 /// Approximate cap (in characters) for the long-term summary note, standing
