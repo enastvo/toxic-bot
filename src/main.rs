@@ -77,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         signal,
         cfg.signal_account.clone(),
         dry_run,
+        signal_bot::metrics::Metrics::new(),
     ));
 
     // hot-reload watcher

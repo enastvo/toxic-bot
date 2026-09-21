@@ -1,9 +1,9 @@
 use crate::llm::{ChatRequest, LlmBackend};
+use crate::metrics::{Metrics, TurnRecord};
 use crate::personalities::{Personalities, Personality};
 use crate::signal::SignalTransport;
 use crate::store::{NewMessage, Store};
-use crate::types::{ChatTurn, IncomingMessage, ReplyMode, Role, Room, StoredMessage};
-use crate::window::select_window;
+use crate::types::{IncomingMessage, ReplyMode, Role, Room};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -27,6 +27,23 @@ pub fn decide(room: &Room, msg: &IncomingMessage) -> Decision {
     }
 }
 
+/// The metrics `decision` string for a routing decision (ruling T9-a).
+fn decision_str(d: Decision) -> &'static str {
+    match d {
+        Decision::Reply => "reply",
+        Decision::Proactive => "proactive",
+        Decision::Silent => "silent",
+    }
+}
+
+/// True if an error (anywhere in its cause chain) looks like a generation timeout.
+fn error_is_timeout(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        let s = c.to_string().to_lowercase();
+        s.contains("timeout") || s.contains("timed out")
+    })
+}
+
 #[derive(Default)]
 pub struct RateLimiter { rooms: Mutex<HashMap<String, RoomRate>> }
 #[derive(Default)]
@@ -43,16 +60,6 @@ impl RateLimiter {
         e.last = now; e.hits.push(now);
         true
     }
-}
-
-pub fn build_turns(window: &[StoredMessage], bot_id: &str) -> Vec<ChatTurn> {
-    window.iter().map(|m| {
-        if m.role == Role::Assistant || m.sender_id == bot_id {
-            ChatTurn { role: Role::Assistant, name: None, content: m.body.clone() }
-        } else {
-            ChatTurn { role: Role::User, name: m.sender_name.clone().or_else(|| Some(m.sender_id.clone())), content: m.body.clone() }
-        }
-    }).collect()
 }
 
 /// Shared conduct rules prepended to every personality's system prompt, so
@@ -99,68 +106,127 @@ pub struct Router {
     bot_id: String,
     dry_run: bool,
     rl: RateLimiter,
+    metrics: Arc<Metrics>,
 }
 
 fn now_secs() -> u64 { time::OffsetDateTime::now_utc().unix_timestamp() as u64 }
+fn now_ms() -> i64 { (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64 }
 
 impl Router {
     pub fn new(store: Store, personalities: Arc<Personalities>, llm: Arc<dyn LlmBackend>,
-               signal: Arc<dyn SignalTransport>, bot_id: String, dry_run: bool) -> Self {
-        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default() }
+               signal: Arc<dyn SignalTransport>, bot_id: String, dry_run: bool, metrics: Arc<Metrics>) -> Self {
+        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default(), metrics }
     }
 
+    /// Back-compat single-message entry point: a burst of one, with no wait.
     pub async fn handle(&self, msg: IncomingMessage) -> anyhow::Result<Option<String>> {
-        // Defense-in-depth: never process/echo our own messages, even if a future
-        // signal-cli format change somehow delivered one back to us as incoming.
-        if msg.sender_id == self.bot_id {
+        self.handle_burst(vec![msg], 0).await
+    }
+
+    /// Process a coalesced burst of messages — all for the SAME room — as a
+    /// single turn. `wait_ms` is how long the burst was allowed to accumulate
+    /// before processing (recorded into metrics by the caller/orchestrator).
+    pub async fn handle_burst(&self, msgs: Vec<IncomingMessage>, wait_ms: u64) -> anyhow::Result<Option<String>> {
+        // Defense-in-depth: never process/echo our own messages. If the batch
+        // is empty after filtering, store nothing and send nothing.
+        let msgs: Vec<IncomingMessage> = msgs.into_iter().filter(|m| m.sender_id != self.bot_id).collect();
+        if msgs.is_empty() {
             return Ok(None);
         }
 
-        let room = self.store.ensure_room(&msg.room_id, msg.sender_name.as_deref().filter(|_| !msg.is_group), msg.is_group).await?;
-        self.store.record_message(NewMessage {
-            room_id: msg.room_id.clone(), sender_id: msg.sender_id.clone(), sender_name: msg.sender_name.clone(),
-            role: Role::User, body: msg.body.clone(), ts: msg.timestamp, personality: None, is_mention: msg.is_mention,
-        }).await?;
+        let newest = msgs.last().unwrap();
+        let room = self.store.ensure_room(
+            &newest.room_id,
+            newest.sender_name.as_deref().filter(|_| !newest.is_group),
+            newest.is_group,
+        ).await?;
+
+        // Record every (non-self) incoming message in arrival order.
+        for m in &msgs {
+            self.store.record_message(NewMessage {
+                room_id: m.room_id.clone(), sender_id: m.sender_id.clone(), sender_name: m.sender_name.clone(),
+                role: Role::User, body: m.body.clone(), ts: m.timestamp, personality: None, is_mention: m.is_mention,
+            }).await?;
+        }
 
         let personality = self.personalities.get_or_default(room.personality.as_deref());
 
-        let decision = decide(&room, &msg);
+        // Global settings -> effective params (personality overrides global).
+        let settings = self.store.get_settings().await?;
+        let eff = crate::settings::resolve(&settings, &personality);
+
+        // Ruling T10-c: prefer an addressed message as the decision trigger,
+        // else fall back to the newest message in the burst.
+        let trigger = msgs
+            .iter()
+            .rev()
+            .find(|m| m.is_mention || m.quoted_msg.is_some())
+            .unwrap_or_else(|| msgs.last().unwrap());
+        let decision = decide(&room, trigger);
         tracing::debug!(room=%room.room_id, ?decision, mode=?room.reply_mode, "routing");
         if decision == Decision::Silent { return Ok(None); }
 
-        // build context window
+        // Build the layered context window. The just-recorded burst is already
+        // the tail of `recent` — do NOT append burst turns a second time.
         let recent = self.store.recent(&room.room_id, 60).await?;
-        let window = select_window(&recent, personality.num_ctx);
-        let turns = build_turns(&window, &self.bot_id);
+        let turns = crate::context::build_context_turns(&recent, &self.bot_id);
 
         if decision == Decision::Proactive {
-            let rel = self.llm.relevance_check(&personality.model, personality.num_ctx, turns.clone()).await?;
+            let rel = self.llm.relevance_check(&personality.model, eff.num_ctx, turns.clone()).await?;
             tracing::debug!(room=%room.room_id, should=rel.should_reply, conf=rel.confidence, thr=personality.proactive.relevance_threshold, "relevance");
-            if !rel.should_reply || rel.confidence < personality.proactive.relevance_threshold { return Ok(None); }
+            if !rel.should_reply || rel.confidence < personality.proactive.relevance_threshold {
+                self.metrics.record(TurnRecord {
+                    room_id: room.room_id.clone(), ts: now_ms(), decision: "proactive", wait_ms,
+                    gen_ms: 0, prompt_tokens: 0, reply_tokens: 0, outcome: "skipped",
+                });
+                return Ok(None);
+            }
             if !self.dry_run && !self.rl.allow(&room.room_id, personality.proactive.cooldown_secs, personality.proactive.max_per_hour, now_secs()) {
                 tracing::debug!(room=%room.room_id, "proactive rate-limited");
+                self.metrics.record(TurnRecord {
+                    room_id: room.room_id.clone(), ts: now_ms(), decision: "proactive", wait_ms,
+                    gen_ms: 0, prompt_tokens: 0, reply_tokens: 0, outcome: "rate_limited",
+                });
                 return Ok(None);
             }
         }
 
-        let (reply, _stats) = self.llm.generate_reply(ChatRequest {
+        let dstr = decision_str(decision);
+
+        let gen = self.llm.generate_reply(ChatRequest {
             model: personality.model.clone(),
             system: system_prompt(&personality, &room),
             turns,
-            temperature: personality.temperature,
-            top_p: personality.top_p,
-            num_ctx: personality.num_ctx,
-            // TODO(Task 10): source from resolved EffectiveParams instead of constants.
-            keep_alive: "30m".into(),
-            repeat_penalty: 1.3,
-            repeat_last_n: 256,
-            num_predict: 512,
-        }).await?;
+            temperature: eff.temperature,
+            top_p: eff.top_p,
+            num_ctx: eff.num_ctx,
+            repeat_penalty: eff.repeat_penalty as f64,
+            repeat_last_n: eff.repeat_last_n,
+            num_predict: eff.num_predict,
+            keep_alive: eff.keep_alive.clone(),
+        }).await;
+
+        let (reply, stats) = match gen {
+            Ok(v) => v,
+            Err(e) => {
+                let outcome = if error_is_timeout(&e) { "timeout" } else { "error" };
+                self.metrics.record(TurnRecord {
+                    room_id: room.room_id.clone(), ts: now_ms(), decision: dstr, wait_ms,
+                    gen_ms: 0, prompt_tokens: 0, reply_tokens: 0, outcome,
+                });
+                return Err(e);
+            }
+        };
 
         if reply.trim().is_empty() { return Ok(None); }
 
         if self.dry_run {
             tracing::info!(room=%room.room_id, %reply, "[dry-run] would send");
+            self.metrics.record(TurnRecord {
+                room_id: room.room_id.clone(), ts: now_ms(), decision: dstr, wait_ms,
+                gen_ms: stats.total_ms, prompt_tokens: stats.prompt_tokens, reply_tokens: stats.reply_tokens,
+                outcome: "dry_run",
+            });
             return Ok(Some(reply));
         }
 
@@ -170,14 +236,20 @@ impl Router {
             personality: Some(personality.name.clone()), is_mention: false,
         }).await?;
         self.signal.send(&room.room_id, room.is_group, &reply).await?;
+
+        self.metrics.record(TurnRecord {
+            room_id: room.room_id.clone(), ts: now_ms(), decision: dstr, wait_ms,
+            gen_ms: stats.total_ms, prompt_tokens: stats.prompt_tokens, reply_tokens: stats.reply_tokens,
+            outcome: "sent",
+        });
         Ok(Some(reply))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Decision, RateLimiter, decide, build_turns, system_prompt};
-    use crate::types::{Room, ReplyMode, IncomingMessage, StoredMessage, Role};
+    use super::{Decision, RateLimiter, decide, system_prompt};
+    use crate::types::{Room, ReplyMode, IncomingMessage};
     use crate::personalities::{Personality, ProactiveConfig};
 
     fn room(mode: ReplyMode, is_group: bool) -> Room {
@@ -186,21 +258,6 @@ mod tests {
     fn msg(is_group: bool, mention: bool) -> IncomingMessage {
         IncomingMessage { room_id: "r".into(), sender_id: "u".into(), sender_name: None, body: "hi".into(),
             is_group, is_mention: mention, quoted_msg: None, timestamp: 0 }
-    }
-
-    fn sm(id: i64, sender: &str, role: Role, body: &str) -> StoredMessage {
-        StoredMessage { id, room_id: "r".into(), sender_id: sender.into(), sender_name: Some(sender.into()),
-            role, body: body.into(), ts: id, personality: None, is_mention: false }
-    }
-
-    #[test]
-    fn build_turns_marks_bot_as_assistant() {
-        let w = vec![ sm(1, "+1000", Role::User, "hi"), sm(2, "+bot", Role::Assistant, "hello") ];
-        let turns = build_turns(&w, "+bot");
-        assert_eq!(turns[0].role, Role::User);
-        assert_eq!(turns[0].name.as_deref(), Some("+1000"));
-        assert_eq!(turns[1].role, Role::Assistant);
-        assert!(turns[1].name.is_none());
     }
 
     #[test]
