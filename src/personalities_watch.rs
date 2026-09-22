@@ -1,7 +1,12 @@
+//! Hot reload for personalities: a filesystem watcher (debounced ~500ms) and a
+//! `SIGHUP` handler both trigger [`Personalities::reload`]. A failed reload
+//! (e.g. `default.toml` missing) keeps the previous set in place.
+
 use crate::personalities::Personalities;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Start the file watcher thread and (on Unix) the `SIGHUP` listener task.
 pub fn spawn(p: Arc<Personalities>, dir: PathBuf) {
     // notify watcher
     let (p1, d1) = (p.clone(), dir.clone());

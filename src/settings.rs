@@ -1,3 +1,7 @@
+//! Runtime settings: resolving the effective generation parameters for a turn
+//! (personality overrides on top of the global DB settings) and validating
+//! values submitted from the dashboard's Settings page.
+
 use crate::personalities::Personality;
 use crate::store::SettingsRow;
 

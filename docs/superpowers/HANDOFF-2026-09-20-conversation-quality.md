@@ -1,6 +1,6 @@
 # HANDOFF — signal-bot conversation-quality / orchestration / observability
 
-**For:** the next agent executing this work. **Date:** 2026-09-20. **Repo:** `/home/user/lab/bot` (branch `master`).
+**For:** the next agent executing this work. **Date:** 2026-09-20. **Repo:** `~/lab/bot` (branch `master`).
 
 ## Your mission
 
@@ -32,18 +32,18 @@ Execute **Phase 1 (Tasks 1–14) first, then STOP** and hand back for deploy + l
 - Modules today: `types, window, store, personalities, personalities_watch, llm, signal, router, repl, config, web/{mod,auth,handlers}`; entry `main.rs`. New modules the plan adds: `orchestrator, context, settings, metrics, summarizer`.
 - Key current signatures you'll change: `LlmBackend::generate_reply(&self, ChatRequest) -> Result<String>` (→ `(String, GenStats)`); `router::{handle, decide, build_turns, system_prompt}`; `main.rs` receive loop spawns one task per message (→ Dispatcher).
 
-## Deployment (bare-metal `bot@bot.local`, IP 10.0.10.197)
+## Deployment (bare-metal `bot@bot.local`, IP <bot-host-ip>)
 
 - SSH as `bot` works over the operator's key (no password for SSH).
 - **You have SCOPED passwordless sudo** on the VM (`/etc/sudoers.d/signal-bot-admin`): run `signal-cli` as the `signal-bot` user, and `systemctl {stop,start,restart,kill -s HUP,--no-pager status,is-active} signal-bot`, and `journalctl -u signal-bot --no-pager`. **You do NOT have** `sudo cp/install/tee` to `/opt` or `/etc`.
 - **Build & deploy pattern:** `cargo build --release` locally → `rsync` the binary + changed sources to `bot@bot.local:~/signal-bot/` → **the operator runs** `sudo install -m755 ~/signal-bot/target/release/signal-bot /opt/signal-bot/signal-bot` (needs their sudo — you can't) → **you** `sudo systemctl restart signal-bot`. Migrations run automatically on connect (sqlx `migrate!`) — the new `0002_settings.sql` / `0003_room_summaries.sql` apply on restart.
 - Config `/etc/signal-bot/config.toml` (root:signal-bot 0640) — operator edits it if new seed keys are needed; settings otherwise live in the DB.
-- Dashboard: `https://10.0.10.197:8443` (self-signed, argon2 admin login). Binds `0.0.0.0`.
+- Dashboard: `https://<bot-host-ip>:8443` (self-signed, argon2 admin login). Binds `0.0.0.0`.
 
 ## Hard stops — hand back to the operator, do NOT do these yourself
 
 - The `/opt` binary install and any `/etc` writes (need the operator's sudo).
-- Any Signal account mutation: `register`, `verify`, `unregister`, `deleteLocalAccountData`, changing the number, deleting `/var/lib/signal-bot`. The account `+14433996053` is registered to **signal-cli as PRIMARY** — re-registering elsewhere breaks the bot. Never do destructive signal-cli.
+- Any Signal account mutation: `register`, `verify`, `unregister`, `deleteLocalAccountData`, changing the number, deleting `/var/lib/signal-bot`. The account `+15555550100` is registered to **signal-cli as PRIMARY** — re-registering elsewhere breaks the bot. Never do destructive signal-cli.
 - Merging to `master` / finishing the branch is the operator's decision (SDD ends with `finishing-a-development-branch`, which presents options).
 
 ## Gotchas / context you must know
@@ -67,4 +67,4 @@ In Bit Blasters (personality `toxic`): send a burst of several messages → **ex
 
 ## Memory
 
-Project memory lives at `/home/user/.claude/projects/-home-user-lab-bot/memory/` (see `signal-bot-deployment.md`) — deployment facts, the scoped-sudo grant, the ACI/PNI note, and the `/no_think` root cause are recorded there. Update it as state changes.
+Project memory lives at `~/.claude/projects/<project>/memory/` (see `signal-bot-deployment.md`) — deployment facts, the scoped-sudo grant, the ACI/PNI note, and the `/no_think` root cause are recorded there. Update it as state changes.

@@ -22,15 +22,19 @@
 
 signal-cli data lives in /var/lib/signal-bot (config dir passed via --config).
 
+In the commands below, replace `<BOT_NUMBER>` with the bot's phone number in
+E.164 form (e.g. `+15555550100`). It must match `signal_account` in
+`/etc/signal-bot/config.toml`.
+
 1. Register (may require solving a captcha; follow the printed link):
-   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +14433996053 register
+   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a <BOT_NUMBER> register
    # If prompted for captcha:
-   # sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +14433996053 register --captcha "<token>"
-2. You will receive an SMS/voice code on the Google Voice number.
+   # sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a <BOT_NUMBER> register --captcha "<token>"
+2. You will receive an SMS/voice code on the bot's number.
 3. Verify:
-   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +14433996053 verify <CODE>
+   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a <BOT_NUMBER> verify <CODE>
 4. Smoke test (send yourself a message):
-   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +14433996053 send -m "hello" <YOUR_NUMBER>
+   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a <BOT_NUMBER> send -m "hello" <YOUR_NUMBER>
 5. Start the bot: sudo systemctl enable --now signal-bot
 
 Notes:

@@ -1,3 +1,7 @@
+//! SQLite persistence (via sqlx): rooms, message history, running room
+//! summaries, the global settings row, per-persona search domains, and the
+//! argon2-hashed admin credential. Migrations in `migrations/` run on connect.
+
 use crate::types::{ReplyMode, Room, StoredMessage, Role};
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};

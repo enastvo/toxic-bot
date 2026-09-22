@@ -2,6 +2,10 @@
 name = "signal-bot"
 version = "0.1.0"
 edition = "2021"
+authors = ["enastvo"]
+license = "GPL-3.0-or-later"
+description = "A self-hosted Signal chat bot backed by a local Ollama LLM, with per-room personalities and a LAN web dashboard."
+repository = "https://github.com/enastvo/toxic-bot"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

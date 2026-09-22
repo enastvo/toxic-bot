@@ -1,3 +1,6 @@
+//! Core domain types shared across modules: reply modes, rooms, incoming and
+//! stored messages, and LLM chat turns.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,3 +1,10 @@
+//! LLM backend abstraction and the Ollama implementation.
+//!
+//! [`LlmBackend`] covers the four model calls the bot makes: a plain reply,
+//! one tool-loop step, the proactive relevance check, and room summarization.
+//! [`OllamaClient`] implements it against Ollama's `/api/chat`; [`MockLlm`]
+//! is the test double.
+
 use crate::types::{ChatTurn, Role};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,10 @@
+//! `signal-bot` entry point.
+//!
+//! Loads config, opens the store, then either bootstraps the admin credential
+//! (`--set-admin`), runs the REPL (`--repl`), or starts the full bot: the TLS
+//! dashboard, the supervised signal-cli daemon, the dispatcher/router, the
+//! personality hot-reload watcher, and the summarization sweep.
+
 use clap::Parser;
 use signal_bot::config::{AppConfig, Cli};
 use signal_bot::llm::{LlmBackend, OllamaClient};
