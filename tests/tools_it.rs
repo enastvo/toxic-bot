@@ -88,6 +88,52 @@ async fn tool_loop_runs_calculator_and_returns_final_reply() {
     assert_eq!(sig.sent.lock().unwrap().len(), 1);
 }
 
+/// Backend that requests a tool on EVERY step, even when no tools are offered.
+/// The router must still terminate after `max_tool_rounds`.
+struct AlwaysToolLlm {
+    steps: Mutex<usize>,
+}
+#[async_trait]
+impl LlmBackend for AlwaysToolLlm {
+    async fn generate_reply(&self, _r: ChatRequest) -> anyhow::Result<(String, GenStats)> {
+        Ok(("unused".into(), GenStats::default()))
+    }
+    async fn relevance_check(&self, _m: &str, _c: u32, _t: Vec<signal_bot::types::ChatTurn>, _to: u64) -> anyhow::Result<Relevance> {
+        Ok(Relevance { should_reply: false, confidence: 0.0 })
+    }
+    async fn summarize(&self, _m: &str, _p: &str, _t: &str, _to: u64) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    async fn chat_step(&self, _messages: Vec<Value>, _tools: &[Value], _opts: &ChatRequest) -> anyhow::Result<AssistantStep> {
+        let mut n = self.steps.lock().unwrap();
+        *n += 1;
+        assert!(*n <= 10, "tool loop did not terminate");
+        Ok(AssistantStep {
+            content: "final".into(),
+            tool_calls: vec![ToolCall { name: "current_time".into(), arguments: json!({}) }],
+            stats: GenStats::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn tool_loop_terminates_when_model_keeps_calling_tools() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    store.upsert_settings(&settings(true)).await.unwrap(); // max_tool_rounds = 2
+    let llm = Arc::new(AlwaysToolLlm { steps: Mutex::new(0) });
+    let r = Router::new(store, personalities(), llm.clone(), Arc::new(MockSignal::new()), "+bot".into(), false,
+                        signal_bot::metrics::Metrics::new(), None, None);
+
+    let msg = IncomingMessage { room_id: "+1000".into(), sender_id: "+1000".into(),
+        sender_name: Some("Alice".into()), body: "time?".into(), is_group: false,
+        is_mention: false, quoted_msg: None, timestamp: 1 };
+    let out = r.handle(msg).await.unwrap();
+
+    assert_eq!(out.as_deref(), Some("final"));
+    // 2 tool rounds + 1 final (tools withheld) step
+    assert_eq!(*llm.steps.lock().unwrap(), 3);
+}
+
 /// Records the domains and search params it was asked for, so we can assert both
 /// the whitelist and the model-chosen topic/recency are passed through.
 struct RecordingSearch {

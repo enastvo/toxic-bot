@@ -29,7 +29,8 @@ struct LoginTemplate {
 }
 
 struct RoomRow {
-    room_id: String,
+    /// The room id percent-encoded for use as a URL path segment.
+    room_path: String,
     display_name: String,
     personality: String,
     reply_mode: String,
@@ -56,6 +57,8 @@ struct PersonalityOption {
 #[template(path = "room.html")]
 struct RoomTemplate {
     room_id: String,
+    /// `room_id` percent-encoded for use as a URL path segment.
+    room_path: String,
     display_name: String,
     messages: Vec<MessageRow>,
     personalities: Vec<PersonalityOption>,
@@ -193,6 +196,28 @@ fn html(body: String) -> Response {
     Html(body).into_response()
 }
 
+/// Percent-encode `s` as a single URL path segment: everything except RFC 3986
+/// unreserved characters is escaped. Room ids are Signal group ids (standard
+/// base64, which contains `/` and `+`) or phone numbers, so they must be
+/// encoded before being placed in `/rooms/{id}` links or redirects; axum's
+/// `Path` extractor decodes them back.
+pub(crate) fn path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Redirect back to a room's detail page.
+fn room_redirect(room_id: &str) -> Response {
+    Redirect::to(&format!("/rooms/{}", path_segment(room_id))).into_response()
+}
+
 fn client_ip(connect_info: Option<ConnectInfo<SocketAddr>>) -> IpAddr {
     connect_info
         .map(|ConnectInfo(addr)| addr.ip())
@@ -226,6 +251,12 @@ pub async fn login_submit(
 
     match state.store.verify_admin(&form.username, &form.password).await {
         Ok(true) => {
+            // Issue a fresh session id on privilege change so a session id
+            // planted before login (session fixation) never becomes an admin
+            // session.
+            if session.cycle_id().await.is_err() {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
             if auth::mark_admin(&session).await.is_err() {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
@@ -254,7 +285,7 @@ pub async fn rooms_index(State(state): State<AppState>) -> Response {
     let rows = rooms
         .into_iter()
         .map(|r| RoomRow {
-            room_id: r.room_id.clone(),
+            room_path: path_segment(&r.room_id),
             display_name: r.display_name.unwrap_or(r.room_id),
             personality: r.personality.unwrap_or_else(|| "default".to_string()),
             reply_mode: r.reply_mode.as_str().to_string(),
@@ -295,6 +326,7 @@ pub async fn room_detail(State(state): State<AppState>, Path(room_id): Path<Stri
 
     html(
         RoomTemplate {
+            room_path: path_segment(&room.room_id),
             room_id: room.room_id.clone(),
             display_name: room.display_name.unwrap_or(room.room_id),
             messages,
@@ -327,7 +359,7 @@ pub async fn set_persona_sources(
     if state.store.set_persona_domains(&persona, &form.domains).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    Redirect::to(&format!("/rooms/{room_id}")).into_response()
+    room_redirect(&room_id)
 }
 
 pub async fn set_personality(
@@ -362,7 +394,7 @@ pub async fn set_personality(
     if state.store.set_personality(&room_id, value).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    Redirect::to(&format!("/rooms/{room_id}")).into_response()
+    room_redirect(&room_id)
 }
 
 pub async fn set_mode(
@@ -384,7 +416,7 @@ pub async fn set_mode(
     if state.store.set_reply_mode(&room_id, mode).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    Redirect::to(&format!("/rooms/{room_id}")).into_response()
+    room_redirect(&room_id)
 }
 
 pub async fn settings_page(State(state): State<AppState>, Query(q): Query<SettingsQuery>) -> Response {

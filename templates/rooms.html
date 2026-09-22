@@ -15,7 +15,7 @@
   <tbody>
   {% for r in rooms %}
     <tr>
-      <td><a href="/rooms/{{ r.room_id }}">{{ r.display_name }}</a></td>
+      <td><a href="/rooms/{{ r.room_path }}">{{ r.display_name }}</a></td>
       <td><span class="badge">{{ r.personality }}</span></td>
       <td><span class="badge">{{ r.reply_mode }}</span></td>
     </tr>

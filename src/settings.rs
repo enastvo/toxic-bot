@@ -19,8 +19,13 @@ pub fn resolve(global: &SettingsRow, p: &Personality) -> EffectiveParams {
     EffectiveParams {
         num_predict: p.num_predict.unwrap_or(global.num_predict) as i32,
         num_ctx: p.num_ctx_override.unwrap_or(global.num_ctx as u32),
-        temperature: p.temperature_override.unwrap_or(global.default_temperature as f32),
-        top_p: p.top_p_override.unwrap_or(global.default_top_p as f32),
+        // Precedence: explicit *_override, then the persona's own value, then
+        // the global setting.
+        temperature: p
+            .temperature_override
+            .or(p.temperature)
+            .unwrap_or(global.default_temperature as f32),
+        top_p: p.top_p_override.or(p.top_p).unwrap_or(global.default_top_p as f32),
         repeat_penalty: p.repeat_penalty.unwrap_or(global.repeat_penalty as f32),
         repeat_last_n: global.repeat_last_n as u32,
         keep_alive: global.keep_alive.clone(),
@@ -137,8 +142,8 @@ mod tests {
             description: None,
             system_prompt: "x".into(),
             model: "m".into(),
-            temperature: 0.5,
-            top_p: 0.9,
+            temperature: None,
+            top_p: None,
             num_ctx: 8192,
             proactive: ProactiveConfig { relevance_threshold: 0.5, cooldown_secs: 60, max_per_hour: 10 },
             num_predict: np,
@@ -157,6 +162,27 @@ mod tests {
         assert_eq!(e.num_predict, 800);
         assert_eq!(e.repeat_penalty, 1.5);
         assert_eq!(e.num_ctx, 8192); // not overridden -> global
+    }
+
+    #[test]
+    fn persona_sampling_values_apply_with_override_precedence() {
+        // unset -> global
+        let mut p = pers(None, None);
+        let e = resolve(&global(), &p);
+        assert_eq!(e.temperature, 0.7);
+        assert_eq!(e.top_p, 0.9);
+        // persona value beats global
+        p.temperature = Some(0.4);
+        p.top_p = Some(0.8);
+        let e = resolve(&global(), &p);
+        assert_eq!(e.temperature, 0.4);
+        assert_eq!(e.top_p, 0.8);
+        // explicit override beats persona value
+        p.temperature_override = Some(1.1);
+        p.top_p_override = Some(0.5);
+        let e = resolve(&global(), &p);
+        assert_eq!(e.temperature, 1.1);
+        assert_eq!(e.top_p, 0.5);
     }
 
     #[test]

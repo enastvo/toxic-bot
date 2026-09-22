@@ -22,8 +22,12 @@ pub struct Personality {
     #[serde(default)] pub description: Option<String>,
     pub system_prompt: String,
     #[serde(default = "default_model")] pub model: String,
-    #[serde(default = "def_temp")] pub temperature: f32,
-    #[serde(default = "def_top_p")] pub top_p: f32,
+    /// Persona sampling temperature. Used when set (unless
+    /// `temperature_override` is also set); `None` falls back to the global
+    /// setting. See `settings::resolve`.
+    #[serde(default)] pub temperature: Option<f32>,
+    /// Persona top-p; same precedence as `temperature`.
+    #[serde(default)] pub top_p: Option<f32>,
     /// Legacy context size, retained for back-compat. NOT consulted for
     /// generation — `settings::resolve` reads `num_ctx_override` (falling back to
     /// the global setting) instead. See `num_ctx_override`.
@@ -42,8 +46,6 @@ pub struct Personality {
     #[serde(default)] pub extra_search_domains: Vec<String>,
 }
 fn default_model() -> String { "qwen3:8b".into() }
-fn def_temp() -> f32 { 0.6 }
-fn def_top_p() -> f32 { 0.9 }
 fn def_ctx() -> u32 { 8192 }
 
 pub struct Personalities { inner: RwLock<Arc<HashMap<String, Arc<Personality>>>> }

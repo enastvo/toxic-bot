@@ -151,6 +151,71 @@ async fn direct_reply_records_one_metrics_reply() {
     assert_eq!(metrics.snapshot().replies, 1);
 }
 
+/// A transport whose sends always fail (e.g. signal-cli socket disconnected).
+struct FailingSignal;
+#[async_trait::async_trait]
+impl signal_bot::signal::SignalTransport for FailingSignal {
+    async fn send(&self, _room_id: &str, _is_group: bool, _text: &str) -> anyhow::Result<()> {
+        anyhow::bail!("signal-cli socket is not connected")
+    }
+}
+
+#[tokio::test]
+async fn failed_send_is_not_recorded_as_a_bot_message() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    seed_settings(&store).await;
+    let llm = Arc::new(MockLlm { reply: "hi there".into(), relevance: Relevance{should_reply:false, confidence:0.0} });
+    let metrics = Metrics::new();
+    let r = Router::new(store.clone(), personalities(), llm, Arc::new(FailingSignal), "+bot".into(), false, metrics.clone(), None, None);
+
+    assert!(r.handle(incoming("+1000", false, false)).await.is_err());
+    // Only the incoming message is stored; the undelivered reply is not.
+    let hist = store.recent("+1000", 10).await.unwrap();
+    assert_eq!(hist.len(), 1);
+    assert_eq!(hist[0].body, "hello bot");
+    assert_eq!(metrics.snapshot().errors, 1);
+}
+
+/// Counts relevance checks so we can prove the (cheap) rate limit is consulted
+/// before the (expensive) relevance model call.
+struct CountingLlm {
+    relevance_calls: std::sync::atomic::AtomicUsize,
+}
+#[async_trait::async_trait]
+impl signal_bot::llm::LlmBackend for CountingLlm {
+    async fn generate_reply(&self, _r: signal_bot::llm::ChatRequest) -> anyhow::Result<(String, signal_bot::llm::GenStats)> {
+        Ok(("chiming in".into(), Default::default()))
+    }
+    async fn relevance_check(&self, _m: &str, _c: u32, _t: Vec<signal_bot::types::ChatTurn>, _to: u64) -> anyhow::Result<Relevance> {
+        self.relevance_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Relevance { should_reply: true, confidence: 1.0 })
+    }
+    async fn summarize(&self, _m: &str, _p: &str, _t: &str, _to: u64) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    async fn chat_step(&self, _m: Vec<serde_json::Value>, _t: &[serde_json::Value], _o: &signal_bot::llm::ChatRequest) -> anyhow::Result<signal_bot::llm::AssistantStep> {
+        Ok(Default::default())
+    }
+}
+
+#[tokio::test]
+async fn proactive_cooldown_skips_relevance_call() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    seed_settings(&store).await;
+    store.ensure_room("G", Some("Grp"), true).await.unwrap();
+    store.set_reply_mode("G", ReplyMode::Proactive).await.unwrap();
+    let sig = Arc::new(MockSignal::new());
+    let llm = Arc::new(CountingLlm { relevance_calls: Default::default() });
+    let r = Router::new(store, personalities(), llm.clone(), sig.clone(), "+bot".into(), false, Metrics::new(), None, None);
+
+    // First unaddressed message: relevance runs, bot chimes in (starts cooldown).
+    assert_eq!(r.handle(incoming("G", true, false)).await.unwrap().as_deref(), Some("chiming in"));
+    // Second, within the 60s cooldown: rate-limited WITHOUT a relevance call.
+    assert!(r.handle(incoming("G", true, false)).await.unwrap().is_none());
+    assert_eq!(llm.relevance_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(sig.sent.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn dm_reply_publishes_bot_sse_event() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
