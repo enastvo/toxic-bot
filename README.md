@@ -143,9 +143,10 @@ The script:
    (never argv), and runs `--set-admin`, which stores an argon2 hash.
 6. **Installs the systemd unit** from `deploy/signal-bot.service`.
 
-> ⚠️ `setup.sh` copies the example config over `/etc/signal-bot/config.toml`.
-> Re-running it replaces your edited config, including `signal_account` and
-> `search_api_key`. Back the config up first.
+> `setup.sh` installs the example config only if `/etc/signal-bot/config.toml`
+> doesn't exist yet, so re-running it keeps your edited config. The bundled
+> personality files *are* re-copied, so keep custom personas under their own
+> file names.
 
 After setup, **edit `/etc/signal-bot/config.toml`** and set `signal_account`
 to the bot's real number. The example ships with a fictional placeholder.
@@ -255,10 +256,11 @@ with a warning.
 | `system_prompt` | yes | Persona instructions. Shared "house rules" are prepended automatically |
 | `model` | no | Ollama model (default `qwen3:8b`) |
 | `[proactive]` | yes | `relevance_threshold` (0–1), `cooldown_secs`, `max_per_hour` |
-| `temperature_override`, `top_p_override`, `num_ctx_override` | no | Per-persona overrides of the global Settings values |
-| `num_predict`, `repeat_penalty` | no | Per-persona overrides of the global Settings values |
+| `temperature`, `top_p` | no | Persona sampling values. Used when set; otherwise the global Settings values apply |
+| `temperature_override`, `top_p_override` | no | Take precedence over `temperature`/`top_p` if both are set |
+| `num_ctx_override`, `num_predict`, `repeat_penalty` | no | Per-persona overrides of the global Settings values |
 | `extra_search_domains` | no | Web-search domains only this persona may use |
-| `temperature`, `top_p`, `num_ctx` | no | Legacy fields. **Currently ignored for generation**; use the `*_override` fields |
+| `num_ctx` | no | Legacy field, ignored for generation. Use `num_ctx_override` |
 
 Personalities hot-reload when files change (via `notify`) or on `SIGHUP`, so
 no restart is needed.

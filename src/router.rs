@@ -69,6 +69,17 @@ pub struct RateLimiter { rooms: Mutex<HashMap<String, RoomRate>> }
 struct RoomRate { last: u64, hits: Vec<u64> }
 
 impl RateLimiter {
+    /// Whether a proactive reply would be allowed now, WITHOUT recording one.
+    /// Used to skip the relevance model call when the answer would be
+    /// discarded anyway.
+    pub fn would_allow(&self, room: &str, cooldown_secs: u64, max_per_hour: u32, now: u64) -> bool {
+        let g = self.rooms.lock().unwrap();
+        let Some(e) = g.get(room) else { return true };
+        if e.last != 0 && now.saturating_sub(e.last) < cooldown_secs { return false; }
+        let recent = e.hits.iter().filter(|t| now.saturating_sub(**t) < 3600).count();
+        (recent as u32) < max_per_hour
+    }
+
     /// Returns true if a proactive reply is allowed now, and records it.
     pub fn allow(&self, room: &str, cooldown_secs: u64, max_per_hour: u32, now: u64) -> bool {
         let mut g = self.rooms.lock().unwrap();
@@ -183,7 +194,14 @@ impl Router {
             let offer = if rounds < max_rounds { schemas.as_slice() } else { &[] };
             let step = self.llm.chat_step(messages.clone(), offer, req).await?;
             total_ms += step.stats.total_ms;
-            if step.tool_calls.is_empty() {
+            // Stop when the model is done calling tools, or once the round
+            // budget is spent. Tools are withheld on the final round, but a
+            // model can still emit tool calls; ignoring them here guarantees
+            // the loop terminates (it holds the global inference permit).
+            if step.tool_calls.is_empty() || rounds >= max_rounds {
+                if !step.tool_calls.is_empty() {
+                    tracing::warn!(room=%room_id, calls=step.tool_calls.len(), "ignoring tool calls past max_tool_rounds");
+                }
                 let mut stats = step.stats;
                 stats.total_ms = total_ms;
                 return Ok((step.content, stats));
@@ -271,6 +289,18 @@ impl Router {
         let turns = crate::context::build_context_turns(&recent, &self.bot_id);
 
         if decision == Decision::Proactive {
+            // Cheap rate-limit check first: during a cooldown or once the
+            // hourly cap is hit, skip the relevance model call entirely (it
+            // holds the global inference permit and would be discarded).
+            let pro = &personality.proactive;
+            if !self.dry_run && !self.rl.would_allow(&room.room_id, pro.cooldown_secs, pro.max_per_hour, now_secs()) {
+                tracing::debug!(room=%room.room_id, "proactive rate-limited (relevance check skipped)");
+                self.metrics.record(TurnRecord {
+                    room_id: room.room_id.clone(), ts: now_ms(), decision: "proactive", wait_ms,
+                    gen_ms: 0, prompt_tokens: 0, reply_tokens: 0, outcome: "rate_limited",
+                });
+                return Ok(None);
+            }
             let rel = self.llm.relevance_check(&personality.model, eff.num_ctx, turns.clone(), settings.ollama_timeout_secs.max(1) as u64).await?;
             tracing::debug!(room=%room.room_id, should=rel.should_reply, conf=rel.confidence, thr=personality.proactive.relevance_threshold, "relevance");
             if !rel.should_reply || rel.confidence < personality.proactive.relevance_threshold {
@@ -343,12 +373,21 @@ impl Router {
             return Ok(Some(reply));
         }
 
+        // Send first, then record: a reply that never reached Signal must not
+        // show up in history (dashboard, future context) as if it was said.
+        if let Err(e) = self.signal.send(&room.room_id, room.is_group, &reply).await {
+            self.metrics.record(TurnRecord {
+                room_id: room.room_id.clone(), ts: now_ms(), decision: dstr, wait_ms,
+                gen_ms: stats.total_ms, prompt_tokens: stats.prompt_tokens, reply_tokens: stats.reply_tokens,
+                outcome: "error",
+            });
+            return Err(e);
+        }
         self.store.record_message(NewMessage {
             room_id: room.room_id.clone(), sender_id: self.bot_id.clone(), sender_name: Some(personality.label.clone()),
-            role: Role::Assistant, body: reply.clone(), ts: now_secs() as i64 * 1000,
+            role: Role::Assistant, body: reply.clone(), ts: now_ms(),
             personality: Some(personality.name.clone()), is_mention: false,
         }).await?;
-        self.signal.send(&room.room_id, room.is_group, &reply).await?;
         if let Some(sse) = &self.sse {
             let _ = sse.send(SseEvent { room_id: room.room_id.clone(), sender: "bot".into(), body: reply.clone() });
         }
@@ -408,8 +447,8 @@ mod tests {
             description: None,
             system_prompt: "You are Sage.".into(),
             model: "qwen3:8b".into(),
-            temperature: 0.6,
-            top_p: 0.9,
+            temperature: Some(0.6),
+            top_p: Some(0.9),
             num_ctx: 8192,
             proactive: ProactiveConfig { relevance_threshold: 0.5, cooldown_secs: 60, max_per_hour: 4 },
             num_predict: None,
@@ -433,8 +472,8 @@ mod tests {
             description: None,
             system_prompt: "You are Sage.".into(),
             model: "qwen3:8b".into(),
-            temperature: 0.6,
-            top_p: 0.9,
+            temperature: Some(0.6),
+            top_p: Some(0.9),
             num_ctx: 8192,
             proactive: ProactiveConfig { relevance_threshold: 0.5, cooldown_secs: 60, max_per_hour: 4 },
             num_predict: None,
@@ -482,5 +521,17 @@ mod tests {
         assert!(!rl.allow("r", 60, 2, 1030));  // within cooldown
         assert!(rl.allow("r", 60, 2, 1070));   // cooldown passed, 2nd allowed
         assert!(!rl.allow("r", 60, 2, 1140));  // cap reached this hour
+    }
+
+    #[test]
+    fn would_allow_matches_allow_without_recording() {
+        let rl = RateLimiter::default();
+        assert!(rl.would_allow("r", 60, 2, 1000)); // unseen room
+        assert!(rl.would_allow("r", 60, 2, 1000)); // still unrecorded
+        assert!(rl.allow("r", 60, 2, 1000));
+        assert!(!rl.would_allow("r", 60, 2, 1030)); // within cooldown
+        assert!(rl.would_allow("r", 60, 2, 1070));  // cooldown passed
+        assert!(rl.allow("r", 60, 2, 1070));
+        assert!(!rl.would_allow("r", 60, 2, 1140)); // hourly cap reached
     }
 }

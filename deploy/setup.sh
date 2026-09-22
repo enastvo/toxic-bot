@@ -10,7 +10,14 @@ id signal-bot &>/dev/null || sudo useradd --system --home /var/lib/signal-bot --
 sudo install -d -o signal-bot -g signal-bot -m 0700 /var/lib/signal-bot
 sudo install -d -m 0755 /etc/signal-bot /etc/signal-bot/personalities /etc/signal-bot/tls /opt/signal-bot
 # 3. config + personalities + binary
-sudo install -m 0640 -o root -g signal-bot deploy/config.example.toml /etc/signal-bot/config.toml
+# Never clobber a live config on re-run: it holds signal_account and the
+# search_api_key secret.
+if sudo test -e /etc/signal-bot/config.toml; then
+  echo "Keeping existing /etc/signal-bot/config.toml (compare with deploy/config.example.toml for new keys)."
+else
+  sudo install -m 0640 -o root -g signal-bot deploy/config.example.toml /etc/signal-bot/config.toml
+  echo "Installed /etc/signal-bot/config.toml -- set signal_account to the bot's number before starting."
+fi
 sudo cp personalities/*.toml /etc/signal-bot/personalities/
 sudo install -m 0755 target/release/signal-bot /opt/signal-bot/signal-bot
 # 4. TLS

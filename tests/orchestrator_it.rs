@@ -129,8 +129,8 @@ async fn burst_coalesces() {
     assert_eq!(ts, vec![1, 2, 3, 4, 5]);
 }
 
-/// The same message (identical timestamp) dispatched twice must be processed
-/// exactly once.
+/// The same message (identical sender + timestamp) dispatched twice must be
+/// processed exactly once.
 #[tokio::test(flavor = "current_thread")]
 async fn dedupe() {
     let fake = Arc::new(FakeHandler::new(Duration::from_millis(10)));
@@ -148,6 +148,31 @@ async fn dedupe() {
         "exact-duplicate timestamp must be dropped"
     );
     assert_eq!(fake.seen_ts.lock().unwrap().clone(), vec![42]);
+}
+
+/// A message whose (sender-clock) timestamp is OLDER than one already processed
+/// must still be handled: Signal timestamps come from each sender's device, so
+/// out-of-order arrival across senders is normal, not a resend.
+#[tokio::test(flavor = "current_thread")]
+async fn older_timestamp_from_other_sender_is_not_dropped() {
+    let fake = Arc::new(FakeHandler::new(Duration::from_millis(10)));
+    let disp = Dispatcher::with_handler(fake.clone(), Duration::from_secs(3600));
+
+    // Alice's clock runs ahead: her message is processed first with ts=1000.
+    disp.dispatch(mk_msg("roomA", 1000)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Bob's message arrives later but carries an earlier timestamp.
+    let mut bob = mk_msg("roomA", 900);
+    bob.sender_id = "+2".into();
+    disp.dispatch(bob).await;
+    // A genuine resend of Alice's message is still dropped.
+    disp.dispatch(mk_msg("roomA", 1000)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut ts = fake.seen_ts.lock().unwrap().clone();
+    ts.sort_unstable();
+    assert_eq!(ts, vec![900, 1000], "older-ts message kept, resend dropped");
 }
 
 /// Two rooms each receiving a message are both processed within a bounded time:

@@ -55,6 +55,14 @@ async fn main() -> anyhow::Result<()> {
     let personalities = Arc::new(Personalities::load_dir(&cfg.personalities_dir)?);
     let dry_run = cli.dry_run || cfg.dry_run;
 
+    // The REPL needs neither Signal nor the dashboard; return before the web
+    // server binds so a REPL session doesn't fight a running service for the
+    // port (or loop on missing TLS files on a dev box).
+    if cli.repl {
+        signal_bot::repl::run(store, personalities, dry_run, cfg.ollama_url.clone()).await?;
+        return Ok(());
+    }
+
     // Metrics + the Ollama client are created early (before the web server)
     // and shared with the Router built later, so `/api/metrics` and the
     // actual generation path report on the exact same instances.
@@ -91,11 +99,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         });
-    }
-
-    if cli.repl {
-        signal_bot::repl::run(store, personalities, dry_run, cfg.ollama_url.clone()).await?;
-        return Ok(());
     }
 
     // real signal + llm + router

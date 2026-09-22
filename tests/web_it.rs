@@ -162,6 +162,66 @@ async fn set_persona_sources_updates_db_and_renders() {
     assert!(html.contains("cnn.com"), "room page should show configured sources");
 }
 
+/// Signal group ids are standard base64 and often contain `/` and `+`. Links,
+/// form actions and redirects must percent-encode the id so `/rooms/:id` still
+/// matches; previously such rooms 404'd and could not be configured.
+#[tokio::test]
+async fn room_ids_with_slashes_are_encoded_and_routable() {
+    let (state, store) = state().await;
+    let gid = "ab/Cd+eF==";
+    let enc = "ab%2FCd%2BeF%3D%3D";
+    store.ensure_room(gid, None, true).await.unwrap();
+    let app = build_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder().method("POST").uri("/login")
+                .header(axum::http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("username=admin&password=pw")).unwrap(),
+        ).await.unwrap();
+    let cookie = session_cookie(&resp);
+
+    // The rooms index links to the encoded path.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder().uri("/")
+                .header(axum::http::header::COOKIE, cookie.clone())
+                .body(Body::empty()).unwrap(),
+        ).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains(&format!("/rooms/{enc}\"")));
+
+    // The encoded path routes to the right room; the redirect stays encoded.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder().method("POST").uri(format!("/rooms/{enc}/mode"))
+                .header(axum::http::header::COOKIE, cookie.clone())
+                .header(axum::http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("mode=always")).unwrap(),
+        ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get(axum::http::header::LOCATION).unwrap(),
+        &format!("/rooms/{enc}")
+    );
+    assert_eq!(store.get_room(gid).await.unwrap().unwrap().reply_mode, ReplyMode::Always);
+
+    // The detail page renders and its forms post to the encoded path.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder().uri(format!("/rooms/{enc}"))
+                .header(axum::http::header::COOKIE, cookie.clone())
+                .body(Body::empty()).unwrap(),
+        ).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains(&format!("action=\"/rooms/{enc}/mode\"")));
+}
+
 /// Regression test: `set_mode`/`set_personality` used to build the redirect
 /// `Location` header from the raw, unvalidated `:id` path segment via
 /// `Redirect::to(&format!("/rooms/{room_id}"))`. Since `Redirect::to` panics

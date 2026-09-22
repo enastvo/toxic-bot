@@ -36,7 +36,7 @@
 use crate::router::Router;
 use crate::types::IncomingMessage;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -48,6 +48,21 @@ const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
 /// Per-room channel capacity. Comfortably larger than any realistic burst so
 /// that `dispatch` never blocks on a full channel in practice.
 const CHANNEL_CAPACITY: usize = 1024;
+
+/// How many recently processed `(sender, timestamp)` keys each room actor
+/// remembers for resend dedupe. Resends arrive close to the original, so a
+/// modest window suffices while keeping memory bounded per room.
+const DEDUPE_WINDOW: usize = 512;
+
+/// Dedupe key for a message: the sender plus its Signal timestamp. The
+/// timestamp alone is not usable as a high-water mark because it is set by the
+/// *sender's* device clock, so messages from different people (or delivered
+/// late) routinely arrive out of timestamp order.
+type DedupeKey = (String, i64);
+
+fn dedupe_key(m: &IncomingMessage) -> DedupeKey {
+    (m.sender_id.clone(), m.timestamp)
+}
 
 /// The burst-processing seam (ruling T11-c). Implemented by [`Router`] in prod
 /// and by a counting fake in tests.
@@ -199,7 +214,8 @@ impl Dispatcher {
             permit: self.permit.clone(),
             idle: self.idle,
             dispatcher: Arc::downgrade(self),
-            last_processed_ts: None,
+            processed: HashSet::new(),
+            processed_order: VecDeque::new(),
             in_flight: self.in_flight.clone(),
         };
         tokio::spawn(actor.run());
@@ -220,8 +236,11 @@ struct RoomActor {
     idle: Duration,
     /// Weak so live actor tasks don't keep the `Dispatcher` alive on their own.
     dispatcher: Weak<Dispatcher>,
-    /// Max timestamp already handled; anything at or below it is a duplicate.
-    last_processed_ts: Option<i64>,
+    /// Keys of recently handled messages (bounded by [`DEDUPE_WINDOW`]); a
+    /// message whose key is here is a resend and is dropped.
+    processed: HashSet<DedupeKey>,
+    /// Insertion order of `processed`, for evicting the oldest keys.
+    processed_order: VecDeque<DedupeKey>,
     /// Shared with the [`Dispatcher`] (see its field doc); set around
     /// `handle_burst` so `gauges()` can report the in-flight room + elapsed.
     in_flight: Arc<Mutex<Option<(String, Instant)>>>,
@@ -276,7 +295,7 @@ impl RoomActor {
 
     /// Coalesce a batch starting from `head` (if any), draining everything else
     /// immediately available, dedupe, and — if the batch is non-empty — run it
-    /// through the global inference permit. Updates `last_processed_ts`.
+    /// through the global inference permit. Remembers the batch's dedupe keys.
     ///
     /// Used both for the normal per-message path (`head = Some`) and for the
     /// reap drain (`head = None`, process whatever the closed channel still
@@ -291,15 +310,15 @@ impl RoomActor {
         let batch_start = Instant::now();
 
         let mut batch: Vec<IncomingMessage> = Vec::new();
-        let mut seen_ts: HashSet<i64> = HashSet::new();
+        let mut seen: HashSet<DedupeKey> = HashSet::new();
         if let Some(h) = head {
-            self.push_dedup(h, &mut batch, &mut seen_ts);
+            self.push_dedup(h, &mut batch, &mut seen);
         }
 
         // Coalesce: drain everything immediately available without blocking.
         // (After `close()` this drains the remaining buffer, then stops.)
         while let Ok(m) = self.rx.try_recv() {
-            self.push_dedup(m, &mut batch, &mut seen_ts);
+            self.push_dedup(m, &mut batch, &mut seen);
         }
 
         if batch.is_empty() {
@@ -307,7 +326,6 @@ impl RoomActor {
             return;
         }
 
-        let max_ts = batch.iter().map(|m| m.timestamp).max().unwrap();
         let wait_ms = batch_start.elapsed().as_millis() as u64;
 
         // Acquire the global permit AROUND the whole handle_burst call (ruling
@@ -339,37 +357,40 @@ impl RoomActor {
             }
         }
 
-        // Mark progress so exact-duplicate (and older) timestamps that arrive
-        // later are dropped.
-        self.last_processed_ts = Some(match self.last_processed_ts {
-            Some(prev) => prev.max(max_ts),
-            None => max_ts,
-        });
+        // Remember this batch's keys so later resends are dropped, evicting the
+        // oldest beyond the window.
+        for key in seen {
+            if self.processed.insert(key.clone()) {
+                self.processed_order.push_back(key);
+            }
+        }
+        while self.processed_order.len() > DEDUPE_WINDOW {
+            if let Some(old) = self.processed_order.pop_front() {
+                self.processed.remove(&old);
+            }
+        }
     }
 
-    /// Push `m` into `batch` unless its timestamp duplicates one already in the
-    /// batch, or is at/below the last processed timestamp (already handled).
+    /// Push `m` into `batch` unless its `(sender, timestamp)` key duplicates one
+    /// already in the batch or one recently processed.
     ///
-    /// Dedupe key is the (timestamp) ALONE, by design: the Signal server
-    /// timestamp is a millisecond epoch and a true resend of a message carries
-    /// the same timestamp, so an exact-ts match is the resend signal. Two
-    /// genuinely distinct messages that happen to share a ts are intentionally
-    /// treated as duplicates (acceptable — collisions at ms granularity in one
-    /// room are vanishingly rare).
+    /// A true resend of a Signal message carries the same sender and
+    /// timestamp, so an exact key match is the resend signal. Messages are
+    /// never dropped merely for having an *older* timestamp: timestamps come
+    /// from each sender's own clock, so out-of-order arrival is normal.
     fn push_dedup(
         &self,
         m: IncomingMessage,
         batch: &mut Vec<IncomingMessage>,
-        seen_ts: &mut HashSet<i64>,
+        seen: &mut HashSet<DedupeKey>,
     ) {
-        if let Some(lp) = self.last_processed_ts {
-            if m.timestamp <= lp {
-                return; // already processed in an earlier batch.
-            }
+        let key = dedupe_key(&m);
+        if self.processed.contains(&key) {
+            return; // already processed in an earlier batch.
         }
-        if seen_ts.insert(m.timestamp) {
+        if seen.insert(key) {
             batch.push(m);
         }
-        // else: exact-duplicate timestamp within this batch -> drop.
+        // else: exact duplicate within this batch -> drop.
     }
 }

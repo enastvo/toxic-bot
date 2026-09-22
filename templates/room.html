@@ -9,7 +9,7 @@
 <p><a href="/">&larr; Rooms</a></p>
 <h1>{{ display_name }}</h1>
 
-<form class="inline" method="post" action="/rooms/{{ room_id }}/personality">
+<form class="inline" method="post" action="/rooms/{{ room_path }}/personality">
   <label for="personality">Personality</label>
   <select id="personality" name="personality">
     {% for p in personalities %}
@@ -19,7 +19,7 @@
   <button type="submit">Set</button>
 </form>
 
-<form class="inline" method="post" action="/rooms/{{ room_id }}/mode">
+<form class="inline" method="post" action="/rooms/{{ room_path }}/mode">
   <label for="mode">Mode</label>
   <select id="mode" name="mode">
     <option value="addressed" {% if mode_addressed %}selected{% endif %}>addressed</option>
@@ -29,7 +29,7 @@
   <button type="submit">Set</button>
 </form>
 
-<form method="post" action="/rooms/{{ room_id }}/persona-sources" style="margin-top:1rem;">
+<form method="post" action="/rooms/{{ room_path }}/persona-sources" style="margin-top:1rem;">
   <label for="persona_domains">Web sources for persona &ldquo;{{ persona_name }}&rdquo;</label>
   <p style="margin:.25rem 0; font-size:.85em; opacity:.75;">
     Extra domains this persona may web-search, one per line or comma-separated (e.g. <code>cnn.com</code>).
