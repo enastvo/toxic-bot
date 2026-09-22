@@ -1,3 +1,8 @@
+//! Per-turn message handling: record incoming messages, decide whether to
+//! reply (reply mode + proactive relevance gate + rate limit), compose the
+//! system prompt and context window, generate (optionally via the bounded
+//! tool loop), then persist and send the reply.
+
 use crate::llm::{ChatRequest, LlmBackend};
 use crate::metrics::{Metrics, TurnRecord};
 use crate::personalities::{Personalities, Personality};

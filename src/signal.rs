@@ -1,3 +1,8 @@
+//! Signal transport: parsing signal-cli JSON-RPC `receive` notifications,
+//! the [`SignalTransport`] send abstraction, a [`MockSignal`] for tests, and
+//! [`SignalCli`], which supervises a `signal-cli daemon` child over a UNIX
+//! socket.
+
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
@@ -262,9 +267,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(r#"{
           "method":"receive","params":{"envelope":{
             "source":"+1000","sourceName":"Alice","timestamp":1710000000000,
-            "dataMessage":{"message":"hey @bot","mentions":[{"number":"+14433996053"}],
+            "dataMessage":{"message":"hey @bot","mentions":[{"number":"+15555550100"}],
               "groupInfo":{"groupId":"GID=="}}}}}"#).unwrap();
-        let m = parse_envelope(&v, "+14433996053").unwrap();
+        let m = parse_envelope(&v, "+15555550100").unwrap();
         assert_eq!(m.room_id, "GID==");
         assert!(m.is_group);
         assert!(m.is_mention);
@@ -278,7 +283,7 @@ mod tests {
           "method":"receive","params":{"envelope":{
             "source":"+1000","sourceName":"Alice","timestamp":1,
             "dataMessage":{"message":"hi"}}}}"#).unwrap();
-        let m = parse_envelope(&v, "+14433996053").unwrap();
+        let m = parse_envelope(&v, "+15555550100").unwrap();
         assert_eq!(m.room_id, "+1000");
         assert!(!m.is_group);
         assert!(!m.is_mention);
@@ -287,6 +292,6 @@ mod tests {
     #[test]
     fn non_data_message_is_none() {
         let v: serde_json::Value = serde_json::from_str(r#"{"method":"receive","params":{"envelope":{"source":"+1","receiptMessage":{}}}}"#).unwrap();
-        assert!(parse_envelope(&v, "+14433996053").is_none());
+        assert!(parse_envelope(&v, "+15555550100").is_none());
     }
 }

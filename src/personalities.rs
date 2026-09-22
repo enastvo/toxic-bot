@@ -1,3 +1,8 @@
+//! Personality definitions loaded from `*.toml` files in the personalities
+//! directory. The file stem is the personality's id; a `default` personality
+//! is mandatory. The loaded set is swapped atomically on reload so readers
+//! always see a complete, consistent map.
+
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;

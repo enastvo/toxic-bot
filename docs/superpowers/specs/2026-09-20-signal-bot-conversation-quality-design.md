@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-20
 **Status:** Approved design, pre-implementation
-**Author:** estefan.nastvogel@icloud.com (with Claude)
+**Author:** enastvo (with Claude)
 **Builds on:** `docs/superpowers/specs/2026-09-19-signal-bot-design.md` (the shipped bot)
 
 ## 1. Context

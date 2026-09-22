@@ -1,7 +1,9 @@
 data_dir = "/var/lib/signal-bot"
 personalities_dir = "/etc/signal-bot/personalities"
 signal_bin = "/usr/local/bin/signal-cli"
-signal_account = "+14433996053"
+# The bot's own Signal number (E.164). Replace with the number you register in
+# deploy/REGISTER.md -- the value below is a reserved fictional placeholder.
+signal_account = "+15555550100"
 ollama_url = "http://127.0.0.1:11434"
 # 0.0.0.0 listens on ALL network interfaces, not just the LAN -- a home box's LAN
 # IP is often DHCP-assigned, so binding to a fixed address isn't always practical.

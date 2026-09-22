@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-19
 **Status:** Approved design, pre-implementation
-**Author:** estefan.nastvogel@icloud.com (with Claude)
+**Author:** enastvo (with Claude)
 
 ## 1. Overview
 
@@ -19,7 +19,7 @@ own transport traffic and one-time package/model downloads.
 
 ### Goals
 
-- One Signal identity (Google Voice number `+14433996053`) that behaves
+- One Signal identity (Google Voice number `+15555550100`) that behaves
   differently per room via configurable personalities.
 - Fully local LLM inference (`qwen3:8b` on Ollama), no external LLM API,
   no per-token cost.
@@ -331,9 +331,9 @@ daemon itself runs as the unprivileged **`signal-bot`** account (see §8).
    no sudo) + data dirs (`/var/lib/signal-bot` mode `0700`, owned by
    `signal-bot`).
 3. **Register Signal** interactively (manual, admin-driven):
-   `signal-cli -a +14433996053 register` (with captcha if prompted) →
+   `signal-cli -a +15555550100 register` (with captcha if prompted) →
    receive the SMS/voice code on Google Voice →
-   `signal-cli -a +14433996053 verify <code>`.
+   `signal-cli -a +15555550100 verify <code>`.
 4. Generate TLS cert + set admin password (setup script).
 5. Drop in personality TOMLs (a `default` + example personalities).
 6. Enable the systemd unit.

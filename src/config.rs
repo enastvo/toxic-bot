@@ -1,3 +1,10 @@
+//! Command-line flags and the `config.toml` schema.
+//!
+//! `config.toml` holds deployment facts (paths, the bot's Signal number, bind
+//! address, TLS files) and the only secret (`search_api_key`). The remaining
+//! fields are *seed* defaults written to the DB `settings` row on first run;
+//! after that the dashboard's Settings page is the source of truth.
+
 use clap::Parser;
 use serde::Deserialize;
 use std::path::PathBuf;

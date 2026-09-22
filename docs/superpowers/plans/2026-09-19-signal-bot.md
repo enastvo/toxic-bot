@@ -14,7 +14,7 @@
 
 - Language: Rust (edition 2021), single binary crate `signal-bot` with a `lib.rs` exposing modules + a thin `main.rs`.
 - TLS everywhere the network is exposed; the **only** inbound listener is the axum HTTPS port bound to the LAN interface. signal-cli socket and Ollama (`127.0.0.1:11434`) are local-only.
-- Bot Signal number: `+14433996053` (Google Voice), one identity.
+- Bot Signal number: `+15555550100` (Google Voice), one identity.
 - LLM model default: `qwen3:8b` via Ollama HTTP chat API.
 - Reply modes (per room): `addressed` | `always` | `proactive`. Default `addressed`.
 - Proactive gating: cheap `relevance_check` (JSON `{should_reply, confidence}`) + per-room `cooldown_secs` and `max_per_hour` from the personality's `[proactive]` block; only reply if `confidence >= relevance_threshold`.
@@ -1058,9 +1058,9 @@ git commit -m "feat: SignalTransport trait and MockSignal"
         let v: serde_json::Value = serde_json::from_str(r#"{
           "method":"receive","params":{"envelope":{
             "source":"+1000","sourceName":"Alice","timestamp":1710000000000,
-            "dataMessage":{"message":"hey @bot","mentions":[{"number":"+14433996053"}],
+            "dataMessage":{"message":"hey @bot","mentions":[{"number":"+15555550100"}],
               "groupInfo":{"groupId":"GID=="}}}}}"#).unwrap();
-        let m = parse_envelope(&v, "+14433996053").unwrap();
+        let m = parse_envelope(&v, "+15555550100").unwrap();
         assert_eq!(m.room_id, "GID==");
         assert!(m.is_group);
         assert!(m.is_mention);
@@ -1074,7 +1074,7 @@ git commit -m "feat: SignalTransport trait and MockSignal"
           "method":"receive","params":{"envelope":{
             "source":"+1000","sourceName":"Alice","timestamp":1,
             "dataMessage":{"message":"hi"}}}}"#).unwrap();
-        let m = parse_envelope(&v, "+14433996053").unwrap();
+        let m = parse_envelope(&v, "+15555550100").unwrap();
         assert_eq!(m.room_id, "+1000");
         assert!(!m.is_group);
         assert!(!m.is_mention);
@@ -1083,7 +1083,7 @@ git commit -m "feat: SignalTransport trait and MockSignal"
     #[test]
     fn non_data_message_is_none() {
         let v: serde_json::Value = serde_json::from_str(r#"{"method":"receive","params":{"envelope":{"source":"+1","receiptMessage":{}}}}"#).unwrap();
-        assert!(parse_envelope(&v, "+14433996053").is_none());
+        assert!(parse_envelope(&v, "+15555550100").is_none());
     }
 ```
 
@@ -2024,7 +2024,7 @@ git commit -m "feat: --repl harness for testing routing/LLM without Signal"
 data_dir = "/var/lib/signal-bot"
 personalities_dir = "/etc/signal-bot/personalities"
 signal_bin = "/usr/local/bin/signal-cli"
-signal_account = "+14433996053"
+signal_account = "+15555550100"
 ollama_url = "http://127.0.0.1:11434"
 bind_addr = "0.0.0.0:8443"          # LAN interface; firewall to the LAN
 cert_path = "/etc/signal-bot/tls/bot.local.crt"
@@ -2118,14 +2118,14 @@ echo "Now complete deploy/REGISTER.md, then: sudo systemctl enable --now signal-
 signal-cli data lives in /var/lib/signal-bot (config dir passed via --config).
 
 1. Register (may require solving a captcha; follow the printed link):
-   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +14433996053 register
+   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +15555550100 register
    # If prompted for captcha:
-   # sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +14433996053 register --captcha "<token>"
+   # sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +15555550100 register --captcha "<token>"
 2. You will receive an SMS/voice code on the Google Voice number.
 3. Verify:
-   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +14433996053 verify <CODE>
+   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +15555550100 verify <CODE>
 4. Smoke test (send yourself a message):
-   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +14433996053 send -m "hello" <YOUR_NUMBER>
+   sudo -u signal-bot signal-cli --config /var/lib/signal-bot -a +15555550100 send -m "hello" <YOUR_NUMBER>
 5. Start the bot: sudo systemctl enable --now signal-bot
 
 Notes:

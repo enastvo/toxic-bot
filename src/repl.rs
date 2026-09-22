@@ -1,3 +1,8 @@
+//! Interactive REPL for exercising the reply pipeline without Signal. Reads
+//! `room|group(0/1)|mention(0/1)|sender|text` lines from stdin, runs them
+//! through a real [`Router`] + Ollama with a [`MockSignal`] transport, and
+//! prints the reply (or `[silent]`).
+
 use crate::llm::OllamaClient;
 use crate::personalities::Personalities;
 use crate::router::Router;

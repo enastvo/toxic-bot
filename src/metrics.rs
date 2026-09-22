@@ -1,3 +1,7 @@
+//! In-memory metrics for the health dashboard: a bounded ring of per-turn
+//! records (decision, latency, token counts, outcome) with aggregate and
+//! per-room rollups, plus a best-effort system snapshot (RAM, RSS, load).
+
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
