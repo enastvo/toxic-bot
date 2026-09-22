@@ -8,6 +8,11 @@ for administration.
 **Author:** [enastvo](https://github.com/enastvo)
 **License:** [GNU GPL v3.0 or later](LICENSE)
 
+> **New install?** Follow **[INSTALLATION.md](INSTALLATION.md)**. It is a
+> step-by-step guide covering the accounts you need (a Google Voice number for
+> Signal, an optional Tavily API key), host prep, build, Signal registration
+> and first login.
+
 ---
 
 ## Contents
@@ -106,7 +111,7 @@ Signal ⇄ signal-cli (JSON-RPC daemon, UNIX socket)
 | `migrations/` | SQLite schema migrations (applied automatically at startup) |
 | `personalities/` | Bundled personality TOML files |
 | `deploy/` | Setup script, systemd unit, TLS cert helper, example config, registration guide |
-| `docs/superpowers/` | Design specs, implementation plans and hand-off notes |
+| `INSTALLATION.md` | Step-by-step install guide, including account prerequisites |
 
 ## Build
 
@@ -118,6 +123,9 @@ The binary is written to `target/release/signal-bot`. The bot targets Linux:
 it uses UNIX sockets to talk to signal-cli and systemd for supervision.
 
 ## Deploy & setup
+
+A summary is below. For the full walkthrough, including account setup, see
+[INSTALLATION.md](INSTALLATION.md).
 
 Run the deployment script from the repo root as a user with `sudo`:
 
