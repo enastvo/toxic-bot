@@ -18,6 +18,9 @@ config.local.toml
 # signal-cli account data
 /signal-data/
 
+# Local design notes / plans (kept out of the repo)
+/docs/
+
 # Editor / OS
 .DS_Store
 *.swp
