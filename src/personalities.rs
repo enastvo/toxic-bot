@@ -130,6 +130,17 @@ max_per_hour=5
     }
 
     #[test]
+    fn shipped_personalities_dir_all_parse() {
+        // Guards against a malformed personality TOML shipping (load_dir SKIPS a
+        // bad file rather than erroring, so a broken persona would silently vanish).
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("personalities");
+        let p = Personalities::load_dir(&dir).expect("personalities/ must contain a default and parse");
+        for name in ["default", "toxic", "boomer", "activist", "asian_father", "football_coach", "suburban_cuckold"] {
+            assert!(p.get(name).is_some(), "personality failed to load: {name}");
+        }
+    }
+
+    #[test]
     fn missing_default_is_error() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "sage.toml", OK);
