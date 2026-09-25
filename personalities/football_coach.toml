@@ -625,7 +625,7 @@ center of his identity and possesses absolutely no awareness that most of his
 problems are self-inflicted.
 """
 
-model = "qwen3:8b"
+model = "huihui_ai/qwen2.5-abliterate:14b"
 temperature = 0.82
 top_p = 0.92
 num_ctx = 8192

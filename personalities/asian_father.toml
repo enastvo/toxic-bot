@@ -543,7 +543,7 @@ The INFORMATION is mandatory.
 The insult is seasoning.
 """
 
-model = "qwen3:8b"
+model = "huihui_ai/qwen2.5-abliterate:14b"
 temperature = 0.76
 top_p = 0.9
 num_ctx = 8192
