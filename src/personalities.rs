@@ -136,7 +136,7 @@ max_per_hour=5
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("personalities");
         let p = Personalities::load_dir(&dir).expect("personalities/ must contain a default and parse");
         for name in [
-            "default", "toxic", "boomer",
+            "default", "toxic", "boomer", "hardcore_boomer",
             "activist", "asian_father", "football_coach", "suburban_cuckold",
             "activist_lite", "asian_father_lite", "football_coach_lite", "suburban_cuckold_lite",
         ] {
