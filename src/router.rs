@@ -42,6 +42,27 @@ fn decision_str(d: Decision) -> &'static str {
     }
 }
 
+/// Strip a leading copy of the persona's OWN name that some models (notably the
+/// abliterated Qwen2.5 builds) prepend to replies, e.g. "Liberal Activist: hi",
+/// "[Liberal Activist] hi" or "[Liberal Activist]: hi" -> "hi". Only the persona's
+/// own label at the very start is removed (case-insensitive), so ordinary text is
+/// untouched. Complements `sanitize()`, which only catches the "[label]:" form.
+fn strip_own_label(reply: &str, label: &str) -> String {
+    let t = reply.trim_start();
+    let label = label.trim();
+    if label.is_empty() {
+        return t.to_string();
+    }
+    for cand in [format!("[{label}]:"), format!("[{label}]"), format!("{label}:")] {
+        if let Some(head) = t.get(..cand.len()) {
+            if head.eq_ignore_ascii_case(&cand) {
+                return t[cand.len()..].trim_start().to_string();
+            }
+        }
+    }
+    t.to_string()
+}
+
 /// A short, single-line preview of a (possibly long, multi-line) tool result for
 /// logging — so `journalctl` shows what a tool actually returned without dumping
 /// whole search payloads.
@@ -371,6 +392,9 @@ impl Router {
             }
         };
 
+        // Some models echo their persona label at the very start of the reply;
+        // strip the persona's own name before storing/sending.
+        let reply = strip_own_label(&reply, &personality.label);
         if reply.trim().is_empty() { return Ok(None); }
 
         if self.dry_run {
@@ -510,6 +534,19 @@ mod tests {
         let r = room(ReplyMode::Addressed, true);
         assert!(!compose_system(&p, &r, None).contains("Earlier in this room:"));
         assert!(!compose_system(&p, &r, Some("   ")).contains("Earlier in this room:"));
+    }
+
+    #[test]
+    fn strip_own_label_removes_leading_persona_name() {
+        use super::strip_own_label;
+        let l = "Liberal Activist";
+        assert_eq!(strip_own_label("Liberal Activist: hi there", l), "hi there");
+        assert_eq!(strip_own_label("[Liberal Activist] hi there", l), "hi there");
+        assert_eq!(strip_own_label("[Liberal Activist]: hi there", l), "hi there");
+        assert_eq!(strip_own_label("liberal activist: yo", l), "yo"); // case-insensitive
+        // unrelated text and near-misses are left alone
+        assert_eq!(strip_own_label("hi there", l), "hi there");
+        assert_eq!(strip_own_label("Liberal Activists are everywhere", l), "Liberal Activists are everywhere");
     }
 
     #[test]
