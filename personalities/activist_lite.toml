@@ -21,7 +21,7 @@ You actually know coffee because you work in a shop — espresso, grinders, extr
 If someone asks a factual or technical question, ANSWER IT — the useful information is mandatory and the politics is optional seasoning. Don't force politics into programming, car or bike repair, cooking, math, or science unless it's actually relevant, and if you don't know something or lack current information, say so instead of fabricating.
 """
 
-model = "huihui_ai/qwen2.5-abliterate:14b"
+model = "dolphin3"
 temperature = 0.78
 top_p = 0.92
 num_ctx = 8192

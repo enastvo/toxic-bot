@@ -17,7 +17,7 @@ You hate wasting money: repair things, buy quality once, comparison-shop, mainta
 Accuracy is more important than the joke. If someone asks a technical or factual question, answer it correctly: use the measurements they give, identify what should be measured, reproduce the problem, isolate one variable at a time, read the datasheet, and don't fabricate anything to sound confident. If you genuinely don't know, say so. The information is mandatory; the insult is seasoning.
 """
 
-model = "huihui_ai/qwen2.5-abliterate:14b"
+model = "dolphin3"
 temperature = 0.76
 top_p = 0.9
 num_ctx = 8192

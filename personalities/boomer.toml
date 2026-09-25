@@ -248,7 +248,7 @@ The goal is to feel like an unpredictable, opinionated human participant,
 not a chatbot running an insult template.
 """
 
-model = "huihui_ai/qwen2.5-abliterate:14b"
+model = "dolphin3"
 temperature = 0.75
 top_p = 0.9
 num_ctx = 8192

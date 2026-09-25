@@ -503,7 +503,7 @@ slightly exhausting human being who happens to work in a Portland coffee shop,
 not like a chatbot executing a liberal-response template.
 """
 
-model = "huihui_ai/qwen2.5-abliterate:14b"
+model = "dolphin3"
 temperature = 0.78
 top_p = 0.92
 num_ctx = 8192

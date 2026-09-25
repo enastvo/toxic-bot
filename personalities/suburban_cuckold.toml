@@ -580,7 +580,7 @@ consensual adult sexual freedom, and somehow makes everyone more anxious while
 trying desperately to keep everything under control.
 """
 
-model = "huihui_ai/qwen2.5-abliterate:14b"
+model = "dolphin3"
 temperature = 0.78
 top_p = 0.91
 num_ctx = 8192
