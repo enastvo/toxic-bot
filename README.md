@@ -19,6 +19,7 @@ for administration.
 
 - [Features](#features)
 - [How it works](#how-it-works)
+- [Recommended specs](#recommended-specs)
 - [Project layout](#project-layout)
 - [Build](#build)
 - [Deploy & setup](#deploy--setup)
@@ -87,6 +88,25 @@ Signal ⇄ signal-cli (JSON-RPC daemon, UNIX socket)
    speaker-labelled context window (`context.rs`) plus the room summary, then
    generates a reply (optionally through the tool loop) and sends it back
    through `signal-cli`.
+
+## Recommended specs
+
+The bot process itself is lightweight; resource needs are driven almost entirely
+by the local LLM (Ollama running `qwen3:8b`). The values below match the
+reference deployment and give comfortable headroom.
+
+| Resource | Recommended | Notes |
+|----------|-------------|-------|
+| CPU | 6+ x86-64 cores | Inference runs on CPU by default; more cores means faster replies. Reference host: Intel Core i9-12900HK |
+| RAM | 16 GB | `qwen3:8b` (Q4_K_M) holds ~7 GB resident; the rest covers the OS, signal-cli's JVM, and the bot |
+| Disk | 40 GB+ free | OS plus the Ollama model (~5 GB), a JRE, and a slowly growing SQLite database |
+| GPU | none required | Inference is CPU-only out of the box. A CUDA/ROCm GPU is optional and makes replies dramatically faster |
+| OS | 64-bit Linux with systemd | Tested on Ubuntu 24.04 / 26.04 LTS. Needs a JRE for signal-cli and UNIX-socket support |
+
+On CPU-only hosts, reply latency scales with core count and with model and
+prompt size. If replies feel slow, prefer leaner personalities (shorter
+`system_prompt`s), lower `num_predict`, or a smaller model before reaching for
+more hardware.
 
 ## Project layout
 
