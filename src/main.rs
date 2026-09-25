@@ -133,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
         metrics.clone(),
         Some(state.tx.clone()),
         search,
+        cfg.operator_ids.clone(),
     ));
     let dispatcher = Dispatcher::new(router);
     let _ = dispatcher_cell.set(dispatcher.clone());

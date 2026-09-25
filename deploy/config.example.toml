@@ -23,6 +23,13 @@ dry_run = false
 # matches, so you don't need to list it.
 mention_aliases = ["toxic-trash"]
 
+# Sender ids (as the bot sees them in received messages — usually your Signal
+# ACI/UUID, sometimes a number) allowed to issue in-chat operator commands.
+# From such a sender, `!steer <directive>` sets a sticky per-room steering
+# instruction injected into that room's prompt, `!steer clear` removes it, and
+# `!steer?` shows it. Others' `!steer` messages are treated as ordinary chat.
+operator_ids = []
+
 # --- Optional: seed defaults for the `settings` table (row id=1) ---
 # These populate the DB-backed settings on first run (admin UI can change them
 # afterward). All are optional; the commented-out values below are the defaults.

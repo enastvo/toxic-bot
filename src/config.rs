@@ -70,6 +70,10 @@ pub struct AppConfig {
     /// `mention_aliases = ["toxic-trash"]`. The bot's own number always matches.
     #[serde(default)] pub mention_aliases: Vec<String>,
 
+    /// Signal sender ids (ACIs or numbers, as they appear in `IncomingMessage.sender_id`)
+    /// allowed to issue in-chat `!steer` operator commands. Others' commands are ignored.
+    #[serde(default)] pub operator_ids: Vec<String>,
+
     // Seed defaults for the `settings` table (row id=1), used to populate it on
     // first run. Task 13 will source these from DB settings thereafter; until
     // then `ollama_timeout_secs` here also drives the OllamaClient HTTP timeout.

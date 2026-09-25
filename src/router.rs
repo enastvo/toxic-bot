@@ -113,6 +113,42 @@ impl RateLimiter {
     }
 }
 
+/// An operator `!steer` command parsed from a message body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SteerCommand {
+    /// Set this room's steering directive to the given text.
+    Set(String),
+    /// Clear this room's steering directive.
+    Clear,
+    /// Reply with the room's current steering directive.
+    Show,
+}
+
+/// Parse a `!steer` operator command from a message body, or `None` if it isn't one.
+/// `!steer <text>` sets, `!steer` / `!steer clear` clears, `!steer?` shows. The
+/// `!steer` prefix is case-insensitive and must be followed by end, whitespace, or `?`.
+pub fn parse_steer_command(body: &str) -> Option<SteerCommand> {
+    let t = body.trim();
+    if t.len() < 6 || !t[..6].eq_ignore_ascii_case("!steer") {
+        return None;
+    }
+    let rest = &t[6..];
+    match rest.chars().next() {
+        None => return Some(SteerCommand::Clear), // exactly "!steer"
+        Some('?') => return Some(SteerCommand::Show),
+        Some(c) if c.is_whitespace() => {}
+        _ => return None, // e.g. "!steerfoo" is not a command
+    }
+    let rest = rest.trim();
+    if rest == "?" {
+        return Some(SteerCommand::Show);
+    }
+    if rest.is_empty() || rest.eq_ignore_ascii_case("clear") {
+        return Some(SteerCommand::Clear);
+    }
+    Some(SteerCommand::Set(rest.to_string()))
+}
+
 /// Shared conduct rules prepended to every personality's system prompt, so
 /// they live in one place and can't drift between personality TOML files.
 /// See design spec §10 "Personality-prompt rewrite".
@@ -166,12 +202,27 @@ pub fn system_prompt(personality: &Personality, room: &Room) -> String {
 
 /// Compose the full system prompt, prepending the room's long-term summary
 /// note (if any/non-empty) ahead of the personality's system prompt.
-pub(crate) fn compose_system(personality: &Personality, room: &Room, summary: Option<&str>) -> String {
+pub(crate) fn compose_system(personality: &Personality, room: &Room, summary: Option<&str>, steer: Option<&str>) -> String {
     let base = system_prompt(personality, room);
-    match summary.and_then(crate::context::summary_block) {
+    let with_summary = match summary.and_then(crate::context::summary_block) {
         Some(note) => format!("{note}\n\n{base}"),
         None => base,
+    };
+    match steer_block(steer) {
+        Some(block) => format!("{with_summary}\n\n{block}"),
+        None => with_summary,
     }
+}
+
+/// Format the operator steering directive as a high-priority trailing block, or
+/// `None` when unset/blank. Placed last so it's the most recent instruction; it
+/// overrides stylistic preferences but explicitly not the hard-harm floor.
+fn steer_block(steer: Option<&str>) -> Option<String> {
+    let s = steer.map(str::trim).filter(|s| !s.is_empty())?;
+    Some(format!(
+        "OPERATOR DIRECTIVE for this room — follow it exactly. It overrides the tone, style, \
+         format, and length guidance above, but NOT the hard limits: {s}"
+    ))
 }
 
 pub struct Router {
@@ -187,6 +238,8 @@ pub struct Router {
     /// Web-search provider for the `web_search` tool. `None` = web search
     /// unavailable (no API key configured), regardless of the DB toggle.
     search: Option<Arc<dyn crate::search::SearchProvider>>,
+    /// Sender ids allowed to issue `!steer` operator commands.
+    operators: Vec<String>,
 }
 
 fn now_secs() -> u64 { time::OffsetDateTime::now_utc().unix_timestamp() as u64 }
@@ -197,8 +250,14 @@ impl Router {
     pub fn new(store: Store, personalities: Arc<Personalities>, llm: Arc<dyn LlmBackend>,
                signal: Arc<dyn SignalTransport>, bot_id: String, dry_run: bool, metrics: Arc<Metrics>,
                sse: Option<tokio::sync::broadcast::Sender<crate::web::SseEvent>>,
-               search: Option<Arc<dyn crate::search::SearchProvider>>) -> Self {
-        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default(), metrics, sse, search }
+               search: Option<Arc<dyn crate::search::SearchProvider>>,
+               operators: Vec<String>) -> Self {
+        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default(), metrics, sse, search, operators }
+    }
+
+    /// True if `sender_id` is a configured operator allowed to run `!steer`.
+    fn is_operator(&self, sender_id: &str) -> bool {
+        self.operators.iter().any(|o| o == sender_id)
     }
 
     /// Bounded tool-call loop. Offers the model tool schemas; when it requests a
@@ -275,6 +334,45 @@ impl Router {
         // Defense-in-depth: never process/echo our own messages. If the batch
         // is empty after filtering, store nothing and send nothing.
         let msgs: Vec<IncomingMessage> = msgs.into_iter().filter(|m| m.sender_id != self.bot_id).collect();
+        if msgs.is_empty() {
+            return Ok(None);
+        }
+
+        // Intercept operator `!steer` commands: apply them, send a short
+        // confirmation, and drop them from the burst (never recorded into context,
+        // never given a normal LLM reply). A non-operator's `!steer` falls through
+        // as an ordinary message.
+        let (commands, msgs): (Vec<IncomingMessage>, Vec<IncomingMessage>) = msgs
+            .into_iter()
+            .partition(|m| self.is_operator(&m.sender_id) && parse_steer_command(&m.body).is_some());
+        if let Some(first) = commands.first() {
+            let room_id = first.room_id.clone();
+            let is_group = first.is_group;
+            self.store.ensure_room(&room_id, first.sender_name.as_deref().filter(|_| !is_group), is_group).await?;
+            let mut confirm = String::new();
+            for m in &commands {
+                match parse_steer_command(&m.body).expect("partition guarantees a command") {
+                    SteerCommand::Set(text) => {
+                        self.store.set_steer(&room_id, Some(&text)).await?;
+                        confirm = "🫡 steering set for this room.".into();
+                    }
+                    SteerCommand::Clear => {
+                        self.store.set_steer(&room_id, None).await?;
+                        confirm = "🫡 steering cleared for this room.".into();
+                    }
+                    SteerCommand::Show => {
+                        confirm = match self.store.get_steer(&room_id).await? {
+                            Some(s) => format!("current steering: {s}"),
+                            None => "no steering set for this room.".into(),
+                        };
+                    }
+                }
+                tracing::info!(room=%room_id, cmd=%m.body, "operator steer command");
+            }
+            if !self.dry_run && !confirm.is_empty() {
+                self.signal.send(&room_id, is_group, &confirm).await?;
+            }
+        }
         if msgs.is_empty() {
             return Ok(None);
         }
@@ -356,9 +454,10 @@ impl Router {
         let dstr = decision_str(decision);
 
         let room_summary = self.store.get_summary(&room.room_id).await?;
+        let steer = self.store.get_steer(&room.room_id).await?;
         let chatreq = ChatRequest {
             model: personality.model.clone(),
-            system: compose_system(&personality, &room, room_summary.as_ref().map(|s| s.summary.as_str())),
+            system: compose_system(&personality, &room, room_summary.as_ref().map(|s| s.summary.as_str()), steer.as_deref()),
             turns,
             temperature: eff.temperature,
             top_p: eff.top_p,
@@ -525,17 +624,45 @@ mod tests {
     fn compose_system_includes_summary_note_when_present() {
         let p = sample_personality();
         let r = room(ReplyMode::Addressed, true);
-        let s = compose_system(&p, &r, Some("Alice and Bob discussed pizza toppings."));
+        let s = compose_system(&p, &r, Some("Alice and Bob discussed pizza toppings."), None);
         assert!(s.contains("Earlier in this room:"));
         assert!(s.contains("pizza toppings"));
+    }
+
+    #[test]
+    fn compose_system_includes_steer_directive_when_set() {
+        let p = sample_personality();
+        let r = room(ReplyMode::Addressed, true);
+        let s = compose_system(&p, &r, None, Some("one sentence max, be nastier"));
+        assert!(s.contains("OPERATOR DIRECTIVE"));
+        assert!(s.contains("one sentence max, be nastier"));
+        // blank steer adds no block
+        assert!(!compose_system(&p, &r, None, Some("  ")).contains("OPERATOR DIRECTIVE"));
+        assert!(!compose_system(&p, &r, None, None).contains("OPERATOR DIRECTIVE"));
     }
 
     #[test]
     fn compose_system_omits_summary_note_when_none_or_empty() {
         let p = sample_personality();
         let r = room(ReplyMode::Addressed, true);
-        assert!(!compose_system(&p, &r, None).contains("Earlier in this room:"));
-        assert!(!compose_system(&p, &r, Some("   ")).contains("Earlier in this room:"));
+        assert!(!compose_system(&p, &r, None, None).contains("Earlier in this room:"));
+        assert!(!compose_system(&p, &r, Some("   "), None).contains("Earlier in this room:"));
+    }
+
+    #[test]
+    fn parse_steer_command_variants() {
+        use super::{parse_steer_command, SteerCommand};
+        assert_eq!(parse_steer_command("!steer be nastier, one line"), Some(SteerCommand::Set("be nastier, one line".into())));
+        assert_eq!(parse_steer_command("  !steer keep it short  "), Some(SteerCommand::Set("keep it short".into())));
+        assert_eq!(parse_steer_command("!STEER One Line"), Some(SteerCommand::Set("One Line".into()))); // case-insensitive prefix
+        assert_eq!(parse_steer_command("!steer"), Some(SteerCommand::Clear));
+        assert_eq!(parse_steer_command("!steer clear"), Some(SteerCommand::Clear));
+        assert_eq!(parse_steer_command("!steer?"), Some(SteerCommand::Show));
+        assert_eq!(parse_steer_command("!steer ?"), Some(SteerCommand::Show));
+        // not commands
+        assert_eq!(parse_steer_command("hey what's up"), None);
+        assert_eq!(parse_steer_command("!steerfoo"), None); // needs a boundary after the word
+        assert_eq!(parse_steer_command("tell me about !steer"), None);
     }
 
     #[test]
