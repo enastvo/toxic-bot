@@ -15,6 +15,14 @@ key_path  = "/etc/signal-bot/tls/bot.local.key"
 debug = false
 dry_run = false
 
+# Extra text handles that count as addressing the bot in a group (on top of
+# native Signal @-mentions and quoted replies). If a group message's text
+# contains any of these -- case-insensitive, with '-'/'_' treated as spaces --
+# the bot treats it as addressed and will reply in `addressed`/`proactive` mode.
+# Set it to the bot's Signal profile/given name. The bot's own number always
+# matches, so you don't need to list it.
+mention_aliases = ["toxic-trash"]
+
 # --- Optional: seed defaults for the `settings` table (row id=1) ---
 # These populate the DB-backed settings on first run (admin UI can change them
 # afterward). All are optional; the commented-out values below are the defaults.
