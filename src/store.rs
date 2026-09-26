@@ -203,6 +203,21 @@ impl Store {
         Ok(())
     }
 
+    /// The room's context cutoff ts: messages at or before it are excluded from
+    /// the reply context window (set by `!reset` to break a lock-in). `None` = none.
+    pub async fn get_context_cutoff(&self, room_id: &str) -> anyhow::Result<Option<i64>> {
+        let row = sqlx::query("SELECT context_cutoff_ts FROM rooms WHERE room_id = ?")
+            .bind(room_id).fetch_optional(&self.pool).await?;
+        Ok(row.and_then(|r| r.get::<Option<i64>, _>("context_cutoff_ts")))
+    }
+
+    /// Set the room's context cutoff ts.
+    pub async fn set_context_cutoff(&self, room_id: &str, ts: i64) -> anyhow::Result<()> {
+        sqlx::query("UPDATE rooms SET context_cutoff_ts = ?, updated_at = ? WHERE room_id = ?")
+            .bind(ts).bind(now_ms()).bind(room_id).execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub fn pool(&self) -> &SqlitePool { &self.pool }
 }
 
@@ -458,6 +473,15 @@ mod tests {
         let mut row2 = got.clone(); row2.num_predict = 1024;
         s.upsert_settings(&row2).await.unwrap();
         assert_eq!(s.get_settings().await.unwrap().num_predict, 1024);
+    }
+
+    #[tokio::test]
+    async fn context_cutoff_roundtrip() {
+        let s = mem().await;
+        s.ensure_room("g1", None, true).await.unwrap();
+        assert!(s.get_context_cutoff("g1").await.unwrap().is_none());
+        s.set_context_cutoff("g1", 12345).await.unwrap();
+        assert_eq!(s.get_context_cutoff("g1").await.unwrap(), Some(12345));
     }
 
     #[tokio::test]

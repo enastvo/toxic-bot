@@ -400,8 +400,12 @@ impl Router {
                         // command as already-covered, so the summarizer starts fresh
                         // from here instead of re-chewing (and re-priming) the backlog.
                         self.store.upsert_summary(&room_id, "", m.timestamp).await?;
+                        // Also exclude everything up to now from the reply context
+                        // window — this is what actually breaks a style lock-in, since
+                        // the recent messages (not just the summary) drive it.
+                        self.store.set_context_cutoff(&room_id, m.timestamp).await?;
                         self.store.set_steer(&room_id, None).await?;
-                        confirm = "🧹 context reset for this room (summary + steering cleared).".into();
+                        confirm = "🧹 context reset for this room (summary + recent-context + steering cleared).".into();
                     }
                 }
                 tracing::info!(room=%room_id, cmd=%m.body, "operator command");
@@ -454,6 +458,13 @@ impl Router {
         // Build the layered context window. The just-recorded burst is already
         // the tail of `recent` — do NOT append burst turns a second time.
         let recent = self.store.recent(&room.room_id, 60).await?;
+        // Drop anything at/before an operator context reset so a style lock-in
+        // can't keep re-priming from the old message window.
+        let cutoff = self.store.get_context_cutoff(&room.room_id).await?;
+        let recent: Vec<_> = recent
+            .into_iter()
+            .filter(|m| cutoff.is_none_or(|c| m.ts > c))
+            .collect();
         let turns = crate::context::build_context_turns(&recent, &self.bot_id);
 
         if decision == Decision::Proactive {

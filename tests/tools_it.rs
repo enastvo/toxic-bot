@@ -303,5 +303,6 @@ async fn operator_reset_clears_summary_and_steer() {
     let summ = store.get_summary("+op").await.unwrap();
     assert!(summ.map(|s| s.summary.trim().is_empty()).unwrap_or(true), "summary should be blanked");
     assert!(store.get_steer("+op").await.unwrap().is_none(), "steer should be cleared");
+    assert_eq!(store.get_context_cutoff("+op").await.unwrap(), Some(1), "context cutoff set to the reset ts");
     assert!(sig.sent.lock().unwrap()[0].1.contains("context reset"));
 }
