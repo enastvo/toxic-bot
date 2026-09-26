@@ -46,6 +46,17 @@ struct MessageRow {
     sender: String,
     body: String,
     role: String,
+    time: String,
+}
+
+/// Format a millisecond epoch timestamp as a compact local time for the chat log,
+/// e.g. "Sep 25, 10:52 PM". Falls back to empty on an out-of-range value.
+fn fmt_ts(ms: i64) -> String {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_millis_opt(ms).single() {
+        Some(dt) => dt.format("%b %-d, %-I:%M %p").to_string(),
+        None => String::new(),
+    }
 }
 
 struct PersonalityOption {
@@ -301,12 +312,15 @@ pub async fn room_detail(State(state): State<AppState>, Path(room_id): Path<Stri
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let history = state.store.history(&room_id, 100).await.unwrap_or_default();
+    // Newest first (reverse the chronological history) so the latest is at the top.
     let messages = history
         .into_iter()
+        .rev()
         .map(|m| MessageRow {
             sender: m.sender_name.unwrap_or(m.sender_id),
             body: m.body,
             role: m.role.as_str().to_string(),
+            time: fmt_ts(m.ts),
         })
         .collect();
     let current_personality = room.personality.clone().unwrap_or_else(|| "default".to_string());

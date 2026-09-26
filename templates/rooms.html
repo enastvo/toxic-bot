@@ -23,4 +23,19 @@
   </tbody>
 </table>
 {% endif %}
+
+<h2 style="margin-top:2rem;">Chat commands</h2>
+<p style="opacity:.75; font-size:.9em;">
+  Sent as normal messages in any room, but honored only from a configured
+  operator (<code>operator_ids</code>). Anyone else's are treated as ordinary chat.
+</p>
+<table>
+  <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>!steer &lt;directive&gt;</code></td><td>Set a sticky, per-room instruction (e.g. <code>!steer one sentence max, be nastier</code>). Overrides tone/style/length, not the hard limits.</td></tr>
+    <tr><td><code>!steer clear</code></td><td>Remove this room's steering directive.</td></tr>
+    <tr><td><code>!steer?</code></td><td>Show the room's current steering directive.</td></tr>
+    <tr><td><code>!reset</code></td><td>Break a context lock-in: clear the room's rolling summary, recent-context window, and steering.</td></tr>
+  </tbody>
+</table>
 {% endblock %}

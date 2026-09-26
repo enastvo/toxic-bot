@@ -39,10 +39,10 @@
   <div><button type="submit">Save sources</button></div>
 </form>
 
-<h2>History</h2>
+<h2>History <span style="font-size:.7em; opacity:.6;">(newest first)</span></h2>
 <div id="history" data-room="{{ room_id }}">
 {% for m in messages %}
-  <div class="msg"><span class="who {{ m.role }}">{{ m.sender }}</span>{{ m.body }}</div>
+  <div class="msg"><span class="ts" style="opacity:.55; font-size:.8em; margin-right:.4em;">{{ m.time }}</span><span class="who {{ m.role }}">{{ m.sender }}</span>{{ m.body }}</div>
 {% endfor %}
 </div>
 
@@ -58,12 +58,18 @@
     if (!data || data.room_id !== roomId) { return; }
     var div = document.createElement('div');
     div.className = 'msg';
+    var ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.style.cssText = 'opacity:.55;font-size:.8em;margin-right:.4em;';
+    ts.textContent = new Date().toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
     var who = document.createElement('span');
     who.className = 'who';
     who.textContent = data.sender;
+    div.appendChild(ts);
     div.appendChild(who);
     div.appendChild(document.createTextNode(data.body));
-    container.appendChild(div);
+    // Newest-first: prepend so live messages appear at the top like the initial load.
+    container.insertBefore(div, container.firstChild);
   });
 })();
 </script>
