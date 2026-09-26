@@ -63,6 +63,17 @@ pub struct AppConfig {
     #[serde(default)] pub debug: bool,
     #[serde(default)] pub dry_run: bool,
 
+    /// Extra text handles that count as addressing the bot in a group, on top of
+    /// native Signal @-mentions and quotes. If a group message's text contains
+    /// any of these (case-insensitive; '-'/'_' treated as spaces), the bot treats
+    /// it as addressed. Set this to the bot's profile/given name, e.g.
+    /// `mention_aliases = ["toxic-trash"]`. The bot's own number always matches.
+    #[serde(default)] pub mention_aliases: Vec<String>,
+
+    /// Signal sender ids (ACIs or numbers, as they appear in `IncomingMessage.sender_id`)
+    /// allowed to issue in-chat `!steer` operator commands. Others' commands are ignored.
+    #[serde(default)] pub operator_ids: Vec<String>,
+
     // Seed defaults for the `settings` table (row id=1), used to populate it on
     // first run. Task 13 will source these from DB settings thereafter; until
     // then `ollama_timeout_secs` here also drives the OllamaClient HTTP timeout.

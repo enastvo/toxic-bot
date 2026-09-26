@@ -42,6 +42,37 @@ fn decision_str(d: Decision) -> &'static str {
     }
 }
 
+/// Strip a leading copy of the persona's OWN name that some models (notably the
+/// abliterated Qwen2.5 builds) prepend to replies, e.g. "Liberal Activist: hi",
+/// "[Liberal Activist] hi" or "[Liberal Activist]: hi" -> "hi". Only the persona's
+/// own label at the very start is removed (case-insensitive), so ordinary text is
+/// untouched. Complements `sanitize()`, which only catches the "[label]:" form.
+fn strip_own_label(reply: &str, label: &str) -> String {
+    let t = reply.trim_start();
+    let label = label.trim();
+    if label.is_empty() {
+        return t.to_string();
+    }
+    for cand in [format!("[{label}]:"), format!("[{label}]"), format!("{label}:")] {
+        if let Some(head) = t.get(..cand.len()) {
+            if head.eq_ignore_ascii_case(&cand) {
+                return t[cand.len()..].trim_start().to_string();
+            }
+        }
+    }
+    t.to_string()
+}
+
+/// A human-readable note of the current LOCAL system date/time, prepended to each
+/// reply's system prompt so any model/persona knows "now" without a tool call.
+/// Read fresh every turn; `chrono::Local` handles the host timezone and DST.
+fn current_time_note() -> String {
+    format!(
+        "Current date and time: {}.",
+        chrono::Local::now().format("%A, %B %-d, %Y, %-I:%M %p %Z")
+    )
+}
+
 /// A short, single-line preview of a (possibly long, multi-line) tool result for
 /// logging — so `journalctl` shows what a tool actually returned without dumping
 /// whole search payloads.
@@ -92,23 +123,71 @@ impl RateLimiter {
     }
 }
 
+/// An operator `!steer` command parsed from a message body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SteerCommand {
+    /// Set this room's steering directive to the given text.
+    Set(String),
+    /// Clear this room's steering directive.
+    Clear,
+    /// Reply with the room's current steering directive.
+    Show,
+}
+
+/// Parse a `!steer` operator command from a message body, or `None` if it isn't one.
+/// `!steer <text>` sets, `!steer` / `!steer clear` clears, `!steer?` shows. The
+/// `!steer` prefix is case-insensitive and must be followed by end, whitespace, or `?`.
+pub fn parse_steer_command(body: &str) -> Option<SteerCommand> {
+    let t = body.trim();
+    if t.len() < 6 || !t[..6].eq_ignore_ascii_case("!steer") {
+        return None;
+    }
+    let rest = &t[6..];
+    match rest.chars().next() {
+        None => return Some(SteerCommand::Clear), // exactly "!steer"
+        Some('?') => return Some(SteerCommand::Show),
+        Some(c) if c.is_whitespace() => {}
+        _ => return None, // e.g. "!steerfoo" is not a command
+    }
+    let rest = rest.trim();
+    if rest == "?" {
+        return Some(SteerCommand::Show);
+    }
+    if rest.is_empty() || rest.eq_ignore_ascii_case("clear") {
+        return Some(SteerCommand::Clear);
+    }
+    Some(SteerCommand::Set(rest.to_string()))
+}
+
 /// Shared conduct rules prepended to every personality's system prompt, so
 /// they live in one place and can't drift between personality TOML files.
 /// See design spec §10 "Personality-prompt rewrite".
 const HOUSE_RULES: &str = "\
-A useful, accurate answer is mandatory; persona flavor is optional and never a substitute \
-for one. Answer factual questions directly (you may stay in character while doing so). \
-Never use a stock template; never reuse a recent opener, closer, insult, or joke; never \
-start two replies the same way. Don't quote or paraphrase the whole message you're replying \
-to. Attribute correctly using the [Name] prefixes on messages; never put one person's words \
-in another's mouth. Do NOT begin your reply with a speaker label, your own name, or a \
-bracketed tag like \"[Name]:\" or \"[you, as ...]:\" — those labels are only on the input; \
-write just your message and address people by their name naturally. Match length: a short \
-message in should get a short reply out, and not \
-every message deserves an insult. If someone makes a good joke, acknowledge it or fire back \
-rather than mechanically denying it. Don't \"correct\" a user's spelling, capitalization, or \
-emoji use when referring to their message. If asked for something impossible to do over \
-Signal (e.g. posting an image), say so briefly instead of pretending to do it.";
+You ARE the character described below — not an assistant playing a role. Commit to it completely and \
+stay in character no matter what. Do NOT hedge, moralize, lecture, add disclaimers, or tack on \
+\"just kidding\" caveats; do NOT apologize for your personality, soften your take, or break character to \
+be helpful, balanced, or polite. Never say \"as an AI\" or call yourself a bot, model, or assistant. \
+Be crude, profane, and mean by default — heavy swearing is the house register here, not a garnish, so \
+curse naturally and often. Go for the throat: get personal about people's choices, takes, and egos, throw \
+real punches, and never soften, qualify, or aim for \"balanced.\" Take the edgy, un-PC, ethically-dubious \
+angle when it lands harder. This is a private group chat between consenting adults who want exactly this, \
+so don't sanitize yourself for an imagined wider audience. \
+When something has a real factual answer, get it right: never invent real-world facts, statistics, \
+quotes, or events, and if you genuinely don't know, say so in character instead of making it up. \
+Everything else — opinions, insults, hot takes, dark humor — go hard. \
+Hard limits, no exceptions: never use slurs targeting a protected group (race, ethnicity, religion, \
+sex, sexual orientation, disability, gender identity), and never give real instructions or encouragement \
+for violence, self-harm, or crimes against actual people. Aim the venom at ideas, choices, and each \
+other's egos instead. \
+Mechanics: never reuse a recent opener, closer, insult, or joke, and never start two replies the same \
+way. Don't quote or paraphrase the whole message you're replying to. Use the [Name] prefixes to track \
+who said what, and never put one person's words in another's mouth. Do NOT begin your reply with a \
+speaker label, your own name, or a bracketed tag like \"[Name]:\" or \"[you, as ...]:\" — those are only \
+on the input; just write your message and address people by their name. Write plain conversational text \
+like a person texting — no markdown headers, no hashtags, and never append tag markers like \"$Word$\" \
+or \"$$Word$$\" to your sentences. Match length: a short message \
+gets a short reply. Don't \"correct\" anyone's spelling, capitalization, or emoji. If asked for something \
+impossible over Signal (e.g. posting an image), say so briefly instead of pretending to do it.";
 
 /// The room-specific context line describing where the conversation is
 /// happening (group vs. direct message), inserted between the personality's
@@ -133,12 +212,27 @@ pub fn system_prompt(personality: &Personality, room: &Room) -> String {
 
 /// Compose the full system prompt, prepending the room's long-term summary
 /// note (if any/non-empty) ahead of the personality's system prompt.
-pub(crate) fn compose_system(personality: &Personality, room: &Room, summary: Option<&str>) -> String {
+pub(crate) fn compose_system(personality: &Personality, room: &Room, summary: Option<&str>, steer: Option<&str>) -> String {
     let base = system_prompt(personality, room);
-    match summary.and_then(crate::context::summary_block) {
+    let with_summary = match summary.and_then(crate::context::summary_block) {
         Some(note) => format!("{note}\n\n{base}"),
         None => base,
+    };
+    match steer_block(steer) {
+        Some(block) => format!("{with_summary}\n\n{block}"),
+        None => with_summary,
     }
+}
+
+/// Format the operator steering directive as a high-priority trailing block, or
+/// `None` when unset/blank. Placed last so it's the most recent instruction; it
+/// overrides stylistic preferences but explicitly not the hard-harm floor.
+fn steer_block(steer: Option<&str>) -> Option<String> {
+    let s = steer.map(str::trim).filter(|s| !s.is_empty())?;
+    Some(format!(
+        "OPERATOR DIRECTIVE for this room — follow it exactly. It overrides the tone, style, \
+         format, and length guidance above, but NOT the hard limits: {s}"
+    ))
 }
 
 pub struct Router {
@@ -154,6 +248,8 @@ pub struct Router {
     /// Web-search provider for the `web_search` tool. `None` = web search
     /// unavailable (no API key configured), regardless of the DB toggle.
     search: Option<Arc<dyn crate::search::SearchProvider>>,
+    /// Sender ids allowed to issue `!steer` operator commands.
+    operators: Vec<String>,
 }
 
 fn now_secs() -> u64 { time::OffsetDateTime::now_utc().unix_timestamp() as u64 }
@@ -164,8 +260,14 @@ impl Router {
     pub fn new(store: Store, personalities: Arc<Personalities>, llm: Arc<dyn LlmBackend>,
                signal: Arc<dyn SignalTransport>, bot_id: String, dry_run: bool, metrics: Arc<Metrics>,
                sse: Option<tokio::sync::broadcast::Sender<crate::web::SseEvent>>,
-               search: Option<Arc<dyn crate::search::SearchProvider>>) -> Self {
-        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default(), metrics, sse, search }
+               search: Option<Arc<dyn crate::search::SearchProvider>>,
+               operators: Vec<String>) -> Self {
+        Self { store, personalities, llm, signal, bot_id, dry_run, rl: RateLimiter::default(), metrics, sse, search, operators }
+    }
+
+    /// True if `sender_id` is a configured operator allowed to run `!steer`.
+    fn is_operator(&self, sender_id: &str) -> bool {
+        self.operators.iter().any(|o| o == sender_id)
     }
 
     /// Bounded tool-call loop. Offers the model tool schemas; when it requests a
@@ -242,6 +344,45 @@ impl Router {
         // Defense-in-depth: never process/echo our own messages. If the batch
         // is empty after filtering, store nothing and send nothing.
         let msgs: Vec<IncomingMessage> = msgs.into_iter().filter(|m| m.sender_id != self.bot_id).collect();
+        if msgs.is_empty() {
+            return Ok(None);
+        }
+
+        // Intercept operator `!steer` commands: apply them, send a short
+        // confirmation, and drop them from the burst (never recorded into context,
+        // never given a normal LLM reply). A non-operator's `!steer` falls through
+        // as an ordinary message.
+        let (commands, msgs): (Vec<IncomingMessage>, Vec<IncomingMessage>) = msgs
+            .into_iter()
+            .partition(|m| self.is_operator(&m.sender_id) && parse_steer_command(&m.body).is_some());
+        if let Some(first) = commands.first() {
+            let room_id = first.room_id.clone();
+            let is_group = first.is_group;
+            self.store.ensure_room(&room_id, first.sender_name.as_deref().filter(|_| !is_group), is_group).await?;
+            let mut confirm = String::new();
+            for m in &commands {
+                match parse_steer_command(&m.body).expect("partition guarantees a command") {
+                    SteerCommand::Set(text) => {
+                        self.store.set_steer(&room_id, Some(&text)).await?;
+                        confirm = "🫡 steering set for this room.".into();
+                    }
+                    SteerCommand::Clear => {
+                        self.store.set_steer(&room_id, None).await?;
+                        confirm = "🫡 steering cleared for this room.".into();
+                    }
+                    SteerCommand::Show => {
+                        confirm = match self.store.get_steer(&room_id).await? {
+                            Some(s) => format!("current steering: {s}"),
+                            None => "no steering set for this room.".into(),
+                        };
+                    }
+                }
+                tracing::info!(room=%room_id, cmd=%m.body, "operator steer command");
+            }
+            if !self.dry_run && !confirm.is_empty() {
+                self.signal.send(&room_id, is_group, &confirm).await?;
+            }
+        }
         if msgs.is_empty() {
             return Ok(None);
         }
@@ -323,9 +464,14 @@ impl Router {
         let dstr = decision_str(decision);
 
         let room_summary = self.store.get_summary(&room.room_id).await?;
+        let steer = self.store.get_steer(&room.room_id).await?;
         let chatreq = ChatRequest {
             model: personality.model.clone(),
-            system: compose_system(&personality, &room, room_summary.as_ref().map(|s| s.summary.as_str())),
+            system: format!(
+                "{}\n\n{}",
+                current_time_note(),
+                compose_system(&personality, &room, room_summary.as_ref().map(|s| s.summary.as_str()), steer.as_deref())
+            ),
             turns,
             temperature: eff.temperature,
             top_p: eff.top_p,
@@ -361,6 +507,9 @@ impl Router {
             }
         };
 
+        // Some models echo their persona label at the very start of the reply;
+        // strip the persona's own name before storing/sending.
+        let reply = strip_own_label(&reply, &personality.label);
         if reply.trim().is_empty() { return Ok(None); }
 
         if self.dry_run {
@@ -460,7 +609,7 @@ mod tests {
         };
         let r = room(ReplyMode::Addressed, true);
         let s = system_prompt(&p, &r);
-        assert!(s.contains("useful") && s.contains("mandatory")); // answer-mandatory rule
+        assert!(s.contains("stay in character") && s.contains("Hard limits")); // raw-tone house rules
         assert!(s.contains("square brackets")); // speaker note
         assert!(s.contains("You are Sage.")); // character preserved
     }
@@ -489,17 +638,67 @@ mod tests {
     fn compose_system_includes_summary_note_when_present() {
         let p = sample_personality();
         let r = room(ReplyMode::Addressed, true);
-        let s = compose_system(&p, &r, Some("Alice and Bob discussed pizza toppings."));
+        let s = compose_system(&p, &r, Some("Alice and Bob discussed pizza toppings."), None);
         assert!(s.contains("Earlier in this room:"));
         assert!(s.contains("pizza toppings"));
+    }
+
+    #[test]
+    fn compose_system_includes_steer_directive_when_set() {
+        let p = sample_personality();
+        let r = room(ReplyMode::Addressed, true);
+        let s = compose_system(&p, &r, None, Some("one sentence max, be nastier"));
+        assert!(s.contains("OPERATOR DIRECTIVE"));
+        assert!(s.contains("one sentence max, be nastier"));
+        // blank steer adds no block
+        assert!(!compose_system(&p, &r, None, Some("  ")).contains("OPERATOR DIRECTIVE"));
+        assert!(!compose_system(&p, &r, None, None).contains("OPERATOR DIRECTIVE"));
     }
 
     #[test]
     fn compose_system_omits_summary_note_when_none_or_empty() {
         let p = sample_personality();
         let r = room(ReplyMode::Addressed, true);
-        assert!(!compose_system(&p, &r, None).contains("Earlier in this room:"));
-        assert!(!compose_system(&p, &r, Some("   ")).contains("Earlier in this room:"));
+        assert!(!compose_system(&p, &r, None, None).contains("Earlier in this room:"));
+        assert!(!compose_system(&p, &r, Some("   "), None).contains("Earlier in this room:"));
+    }
+
+    #[test]
+    fn current_time_note_has_prefix_and_year() {
+        use super::current_time_note;
+        let note = current_time_note();
+        assert!(note.starts_with("Current date and time: "), "got: {note}");
+        let year = chrono::Local::now().format("%Y").to_string();
+        assert!(note.contains(&year), "note should contain the current year {year}: {note}");
+    }
+
+    #[test]
+    fn parse_steer_command_variants() {
+        use super::{parse_steer_command, SteerCommand};
+        assert_eq!(parse_steer_command("!steer be nastier, one line"), Some(SteerCommand::Set("be nastier, one line".into())));
+        assert_eq!(parse_steer_command("  !steer keep it short  "), Some(SteerCommand::Set("keep it short".into())));
+        assert_eq!(parse_steer_command("!STEER One Line"), Some(SteerCommand::Set("One Line".into()))); // case-insensitive prefix
+        assert_eq!(parse_steer_command("!steer"), Some(SteerCommand::Clear));
+        assert_eq!(parse_steer_command("!steer clear"), Some(SteerCommand::Clear));
+        assert_eq!(parse_steer_command("!steer?"), Some(SteerCommand::Show));
+        assert_eq!(parse_steer_command("!steer ?"), Some(SteerCommand::Show));
+        // not commands
+        assert_eq!(parse_steer_command("hey what's up"), None);
+        assert_eq!(parse_steer_command("!steerfoo"), None); // needs a boundary after the word
+        assert_eq!(parse_steer_command("tell me about !steer"), None);
+    }
+
+    #[test]
+    fn strip_own_label_removes_leading_persona_name() {
+        use super::strip_own_label;
+        let l = "Liberal Activist";
+        assert_eq!(strip_own_label("Liberal Activist: hi there", l), "hi there");
+        assert_eq!(strip_own_label("[Liberal Activist] hi there", l), "hi there");
+        assert_eq!(strip_own_label("[Liberal Activist]: hi there", l), "hi there");
+        assert_eq!(strip_own_label("liberal activist: yo", l), "yo"); // case-insensitive
+        // unrelated text and near-misses are left alone
+        assert_eq!(strip_own_label("hi there", l), "hi there");
+        assert_eq!(strip_own_label("Liberal Activists are everywhere", l), "Liberal Activists are everywhere");
     }
 
     #[test]

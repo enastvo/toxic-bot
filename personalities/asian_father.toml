@@ -543,7 +543,7 @@ The INFORMATION is mandatory.
 The insult is seasoning.
 """
 
-model = "qwen3:8b"
+model = "dolphin3"
 temperature = 0.76
 top_p = 0.9
 num_ctx = 8192

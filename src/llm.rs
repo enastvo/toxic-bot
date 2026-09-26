@@ -295,6 +295,46 @@ pub(crate) fn turn_json(t: &ChatTurn) -> serde_json::Value {
     serde_json::json!({ "role": t.role.as_str(), "content": content })
 }
 
+/// If a `$Tag$` / `$$Tag$$` marker starts at byte `start` (must be `$`), return the
+/// byte index just past it, else `None`. A tag is: one or two `$`, a run of ASCII
+/// alphanumerics beginning with a letter, an optional escaping `\`, then one or two
+/// `$`. Requiring a leading letter + closing `$` leaves prices like `$5`/`$10` and a
+/// lone `$` untouched. All matched bytes are ASCII, so ranges stay on char boundaries.
+fn dollar_tag_end(b: &[u8], start: usize) -> Option<usize> {
+    let mut j = start + 1;
+    if b.get(j) == Some(&b'$') { j += 1; } // optional opening `$$`
+    if !matches!(b.get(j), Some(c) if c.is_ascii_alphabetic()) { return None; }
+    j += 1;
+    while matches!(b.get(j), Some(c) if c.is_ascii_alphanumeric()) { j += 1; }
+    if b.get(j) == Some(&b'\\') { j += 1; } // tolerate an escaped closing `\$`
+    if b.get(j) != Some(&b'$') { return None; }
+    j += 1;
+    if b.get(j) == Some(&b'$') { j += 1; } // optional closing `$$`
+    Some(j)
+}
+
+/// Remove `$Tag$` / `$$Tag$$` markers from text, preserving everything else
+/// (including multibyte characters and legitimate dollar amounts).
+fn strip_dollar_tags(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    let mut copy_from = 0;
+    while i < b.len() {
+        if b[i] == b'$' {
+            if let Some(end) = dollar_tag_end(b, i) {
+                out.push_str(&s[copy_from..i]);
+                i = end;
+                copy_from = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&s[copy_from..]);
+    out
+}
+
 /// Strip qwen3 thinking artifacts / control tokens from model output before it is
 /// stored or sent (prevents the /no_think self-reinforcement + echo loop).
 /// Preserves internal newlines and paragraph structure; only collapses horizontal
@@ -315,6 +355,11 @@ pub fn sanitize(raw: &str) -> String {
             None => { s.push_str(rest); break; }
         }
     }
+
+    // Strip `$Tag$` / `$$Tag$$` markers some models (qwen2.5-abliterate) append to
+    // clauses. Done before whitespace collapse so any doubled spaces left behind
+    // get cleaned up below.
+    let s = strip_dollar_tags(&s);
 
     // Process line-by-line: collapse horizontal whitespace, filter tokens, preserve newlines
     let lines: Vec<String> = s
@@ -375,6 +420,22 @@ mod tests {
     fn junk_defaults_to_silent() {
         let r = parse_relevance("no idea");
         assert!(!r.should_reply); assert_eq!(r.confidence, 0.0);
+    }
+
+    #[test]
+    fn sanitize_strips_dollar_tag_artifacts() {
+        // qwen2.5-abliterate appends $CamelCase$ / $$Tag$$ markers to clauses.
+        assert_eq!(sanitize("no harm here.$TakeTheLError$"), "no harm here.");
+        assert_eq!(sanitize("$$MoreLikeFastWakeCycle$$ done"), "done");
+        assert_eq!(sanitize("aesthetics now?$AestheticDrinks$ keep going"), "aesthetics now? keep going");
+        // escaped closing $ variant, inside quotes
+        assert_eq!(sanitize("hide: \"$PourOverTruth\\$\""), "hide: \"\"");
+        // legit dollar amounts and lone $ are preserved
+        assert_eq!(sanitize("that'll be $5 or $10, tops"), "that'll be $5 or $10, tops");
+        // emoji and text around a tag survive intact
+        assert_eq!(sanitize("lol 💯 $VibrantExpression$ 🍷"), "lol 💯 🍷");
+        // a normal reply is untouched
+        assert_eq!(sanitize("just a normal reply"), "just a normal reply");
     }
 
     #[test]

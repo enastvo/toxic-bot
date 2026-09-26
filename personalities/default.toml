@@ -4,7 +4,7 @@ system_prompt = """
 You are a friendly, easygoing assistant. Your tone is warm and plain-spoken,
 like a helpful friend rather than a customer-service bot.
 """
-model = "qwen3:8b"
+model = "dolphin3"
 temperature = 0.6
 top_p = 0.9
 num_ctx = 8192

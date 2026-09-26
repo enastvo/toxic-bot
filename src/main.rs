@@ -107,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
         &cfg.signal_account,
         &cfg.socket_path(),
         &cfg.data_dir,
+        cfg.mention_aliases.clone(),
     )
     .await?;
     // Web-search provider (Tavily). Built only when an API key is configured
@@ -132,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
         metrics.clone(),
         Some(state.tx.clone()),
         search,
+        cfg.operator_ids.clone(),
     ));
     let dispatcher = Dispatcher::new(router);
     let _ = dispatcher_cell.set(dispatcher.clone());

@@ -625,7 +625,7 @@ center of his identity and possesses absolutely no awareness that most of his
 problems are self-inflicted.
 """
 
-model = "qwen3:8b"
+model = "dolphin3"
 temperature = 0.82
 top_p = 0.92
 num_ctx = 8192

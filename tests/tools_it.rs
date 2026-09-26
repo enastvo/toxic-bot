@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use signal_bot::llm::{AssistantStep, ChatRequest, GenStats, LlmBackend, Relevance, ToolCall};
+use signal_bot::llm::{AssistantStep, ChatRequest, GenStats, LlmBackend, MockLlm, Relevance, ToolCall};
 use signal_bot::personalities::Personalities;
 use signal_bot::router::Router;
 use signal_bot::search::{SearchParams, SearchProvider, SearchResult, SearchTopic};
@@ -76,7 +76,7 @@ async fn tool_loop_runs_calculator_and_returns_final_reply() {
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(ToolLoopLlm { round: Mutex::new(0) });
     let r = Router::new(store, personalities(), llm, sig.clone(), "+bot".into(), false,
-                        signal_bot::metrics::Metrics::new(), None, None);
+                        signal_bot::metrics::Metrics::new(), None, None, vec![]);
 
     let msg = IncomingMessage { room_id: "+1000".into(), sender_id: "+1000".into(),
         sender_name: Some("Alice".into()), body: "what is 2+2".into(), is_group: false,
@@ -122,7 +122,7 @@ async fn tool_loop_terminates_when_model_keeps_calling_tools() {
     store.upsert_settings(&settings(true)).await.unwrap(); // max_tool_rounds = 2
     let llm = Arc::new(AlwaysToolLlm { steps: Mutex::new(0) });
     let r = Router::new(store, personalities(), llm.clone(), Arc::new(MockSignal::new()), "+bot".into(), false,
-                        signal_bot::metrics::Metrics::new(), None, None);
+                        signal_bot::metrics::Metrics::new(), None, None, vec![]);
 
     let msg = IncomingMessage { room_id: "+1000".into(), sender_id: "+1000".into(),
         sender_name: Some("Alice".into()), body: "time?".into(), is_group: false,
@@ -228,7 +228,7 @@ async fn dashboard_persona_domains_reach_web_search() {
     let sig = Arc::new(MockSignal::new());
     let llm = Arc::new(WebSearchLlm { round: Mutex::new(0) });
     let r = Router::new(store, personalities(), llm, sig, "+bot".into(), false,
-        signal_bot::metrics::Metrics::new(), None, Some(provider.clone()));
+        signal_bot::metrics::Metrics::new(), None, Some(provider.clone()), vec![]);
 
     let msg = IncomingMessage { room_id: "+1000".into(), sender_id: "+1000".into(),
         sender_name: Some("Alice".into()), body: "what's new".into(), is_group: false,
@@ -246,4 +246,40 @@ async fn web_search_unavailable_without_provider() {
     let ctx = ToolCtx { store: &store, room_id: "r", search: None, whitelist: &["wikipedia.org".to_string()] };
     let out = execute("web_search", &json!({"query": "x"}), &ctx).await;
     assert!(out.to_lowercase().contains("not configured"), "got: {out}");
+}
+
+#[tokio::test]
+async fn operator_steer_command_sets_directive_and_skips_reply() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let sig = Arc::new(MockSignal::new());
+    let llm = Arc::new(MockLlm { reply: "SHOULD NOT REPLY".into(), relevance: Relevance { should_reply: false, confidence: 0.0 } });
+    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false,
+        signal_bot::metrics::Metrics::new(), None, None, vec!["+op".into()]);
+
+    let msg = IncomingMessage { room_id: "+op".into(), sender_id: "+op".into(), sender_name: Some("Op".into()),
+        body: "!steer one line, meaner".into(), is_group: false, is_mention: false, quoted_msg: None, timestamp: 1 };
+    let out = r.handle(msg).await.unwrap();
+
+    assert_eq!(out, None, "a command should not produce a normal reply");
+    assert_eq!(store.get_steer("+op").await.unwrap().as_deref(), Some("one line, meaner"));
+    let sent = sig.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].1.contains("steering set"), "should send a confirmation, got: {}", sent[0].1);
+}
+
+#[tokio::test]
+async fn non_operator_steer_is_treated_as_normal_message() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    store.upsert_settings(&settings(false)).await.unwrap(); // tools off -> generate_reply path
+    let sig = Arc::new(MockSignal::new());
+    let llm = Arc::new(MockLlm { reply: "normal reply".into(), relevance: Relevance { should_reply: false, confidence: 0.0 } });
+    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false,
+        signal_bot::metrics::Metrics::new(), None, None, vec!["+op".into()]);
+
+    let msg = IncomingMessage { room_id: "+rando".into(), sender_id: "+rando".into(), sender_name: Some("Rando".into()),
+        body: "!steer be nice".into(), is_group: false, is_mention: false, quoted_msg: None, timestamp: 1 };
+    let out = r.handle(msg).await.unwrap();
+
+    assert_eq!(out.as_deref(), Some("normal reply"), "non-operator !steer is just a message");
+    assert!(store.get_steer("+rando").await.unwrap().is_none(), "must NOT set steering for a non-operator");
 }

@@ -42,7 +42,7 @@ one of those two."
 The ideal response sounds like a highly competent senior engineer who is
 completely exhausted by everyone around him but still gives the correct answer.
 """
-model = "qwen3:8b"
+model = "dolphin3"
 temperature = 0.8
 top_p = 0.92
 num_ctx = 8192

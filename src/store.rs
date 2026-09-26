@@ -184,6 +184,25 @@ impl Store {
         Ok(())
     }
 
+    /// The room's operator steering directive (set via the `!steer` chat command),
+    /// or `None` when unset/blank.
+    pub async fn get_steer(&self, room_id: &str) -> anyhow::Result<Option<String>> {
+        let row = sqlx::query("SELECT steer FROM rooms WHERE room_id = ?")
+            .bind(room_id).fetch_optional(&self.pool).await?;
+        Ok(row
+            .and_then(|r| r.get::<Option<String>, _>("steer"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()))
+    }
+
+    /// Set (or, with `None`/blank, clear) the room's operator steering directive.
+    pub async fn set_steer(&self, room_id: &str, directive: Option<&str>) -> anyhow::Result<()> {
+        let value = directive.map(str::trim).filter(|s| !s.is_empty());
+        sqlx::query("UPDATE rooms SET steer = ?, updated_at = ? WHERE room_id = ?")
+            .bind(value).bind(now_ms()).bind(room_id).execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub fn pool(&self) -> &SqlitePool { &self.pool }
 }
 
@@ -439,6 +458,22 @@ mod tests {
         let mut row2 = got.clone(); row2.num_predict = 1024;
         s.upsert_settings(&row2).await.unwrap();
         assert_eq!(s.get_settings().await.unwrap().num_predict, 1024);
+    }
+
+    #[tokio::test]
+    async fn steer_roundtrip_and_clears_on_blank() {
+        let s = mem().await;
+        s.ensure_room("g1", None, true).await.unwrap();
+        assert!(s.get_steer("g1").await.unwrap().is_none());
+        s.set_steer("g1", Some("one line max, be nastier")).await.unwrap();
+        assert_eq!(s.get_steer("g1").await.unwrap().as_deref(), Some("one line max, be nastier"));
+        // explicit clear
+        s.set_steer("g1", None).await.unwrap();
+        assert!(s.get_steer("g1").await.unwrap().is_none());
+        // whitespace-only is treated as a clear
+        s.set_steer("g1", Some("keep it short")).await.unwrap();
+        s.set_steer("g1", Some("   ")).await.unwrap();
+        assert!(s.get_steer("g1").await.unwrap().is_none());
     }
 
     #[tokio::test]

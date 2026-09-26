@@ -27,6 +27,7 @@ for administration.
 - [Web dashboard](#web-dashboard)
 - [Tools and web search](#tools-and-web-search)
 - [Personalities](#personalities)
+- [Operator steering](#operator-steering)
 - [Command-line flags](#command-line-flags)
 - [REPL (testing without Signal)](#repl-testing-without-signal)
 - [On-host smoke test](#on-host-smoke-test)
@@ -194,6 +195,8 @@ is the template.
 | `cert_path`, `key_path` | TLS certificate and private key (PEM) |
 | `debug`, `dry_run` | Can also be set with CLI flags |
 | `search_api_key` | **Secret.** Tavily API key. Web search is unavailable without it |
+| `mention_aliases` | Text names that also count as addressing the bot in a group (e.g. `["toxic-trash"]`), on top of native @-mentions and quotes. Case-insensitive; `-`/`_` match spaces |
+| `operator_ids` | Sender ids allowed to issue in-chat `!steer` operator commands (see [Operator steering](#operator-steering)). Others' `!steer` messages are ordinary chat |
 
 The example config also lists optional **seed values** for the runtime
 settings (`keep_alive`, `num_predict`, `num_ctx`, `tools_enabled`,
@@ -210,7 +213,8 @@ Open `https://bot.local:8443` (or the host's LAN address) and trust the local
 TLS certificate. For a self-signed cert, import it on your viewing device.
 
 - **Rooms:** pick a room, then set its **personality** and **reply mode**:
-  - **addressed:** reply only when the bot is @-mentioned or quoted
+  - **addressed:** reply only when the bot is @-mentioned, quoted, or named in
+    text via a `mention_aliases` handle
   - **always:** reply to every message
   - **proactive:** always reply when addressed. Otherwise a relevance check
     decides whether to chime in, subject to the personality's cooldown and
@@ -288,6 +292,24 @@ relevance_threshold = 0.7
 cooldown_secs = 120
 max_per_hour = 6
 ```
+
+## Operator steering
+
+Configured operators (`operator_ids` in the config) can steer a room's replies
+from chat, without the dashboard. In the room, send:
+
+| Command | Effect |
+|---------|--------|
+| `!steer <directive>` | Set a sticky, per-room instruction (e.g. `!steer one sentence max, and be nastier`) |
+| `!steer clear` | Remove this room's directive |
+| `!steer?` | Show the current directive |
+
+The directive is stored on the room (survives restarts) and injected into that
+room's system prompt as a high-priority block — it overrides tone/style/length
+guidance but not the built-in hard limits. It applies to whichever persona the
+room is running. Commands are honored **only** from an `operator_ids` sender,
+aren't recorded into conversation context, and get a short confirmation instead
+of a normal reply; a `!steer` from anyone else is treated as ordinary chat.
 
 ## Command-line flags
 

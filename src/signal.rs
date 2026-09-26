@@ -10,7 +10,7 @@ use crate::types::IncomingMessage;
 
 /// Parse a signal-cli JSON-RPC "receive" notification into an `IncomingMessage`.
 /// Returns `None` for anything that isn't a data message (receipts, typing, sync, etc).
-pub fn parse_envelope(v: &serde_json::Value, bot_id: &str) -> Option<IncomingMessage> {
+pub fn parse_envelope(v: &serde_json::Value, bot_id: &str, aliases: &[String]) -> Option<IncomingMessage> {
     let env = v.get("params")?.get("envelope")?;
     let dm = env.get("dataMessage")?;
     let body = dm.get("message")?.as_str()?.to_string();
@@ -20,12 +20,41 @@ pub fn parse_envelope(v: &serde_json::Value, bot_id: &str) -> Option<IncomingMes
     let group_id = dm.get("groupInfo").and_then(|g| g.get("groupId")).and_then(|x| x.as_str());
     let is_group = group_id.is_some();
     let room_id = group_id.map(String::from).unwrap_or_else(|| source.clone());
-    let is_mention = dm.get("mentions").and_then(|m| m.as_array())
+    // Addressed if there's a native Signal @-mention of the bot's number, OR the
+    // message text names the bot (its number or a configured alias like its
+    // profile name). The text match lets people write "toxic-trash, ..." instead
+    // of a formal @-mention.
+    let native_mention = dm.get("mentions").and_then(|m| m.as_array())
         .map(|arr| arr.iter().any(|m| m.get("number").and_then(|n| n.as_str()) == Some(bot_id)))
         .unwrap_or(false);
+    let is_mention = native_mention || body_addresses_bot(&body, bot_id, aliases);
     let quoted_msg = dm.get("quote").and_then(|q| q.get("text")).and_then(|x| x.as_str()).map(String::from);
     Some(IncomingMessage { room_id, sender_id: source, sender_name: source_name, body,
         is_group, is_mention, quoted_msg, timestamp: ts })
+}
+
+/// Normalize a handle/message for name matching: lowercase, and treat `-` and `_`
+/// as spaces, collapsing runs of whitespace. So "Toxic-Trash", "toxic trash" and
+/// "toxic_trash" all normalize to "toxic trash".
+fn normalize_handle(s: &str) -> String {
+    let spaced: String = s.chars()
+        .map(|c| if c == '-' || c == '_' { ' ' } else { c.to_ascii_lowercase() })
+        .collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// True if the message text names the bot — by its own id/number or any
+/// configured alias (e.g. its profile name). Case-insensitive; `-`/`_` match
+/// spaces. This is a text fallback for when someone addresses the bot by name
+/// instead of using a formal Signal @-mention.
+fn body_addresses_bot(body: &str, bot_id: &str, aliases: &[String]) -> bool {
+    let nb = normalize_handle(body);
+    std::iter::once(bot_id)
+        .chain(aliases.iter().map(String::as_str))
+        .any(|a| {
+            let na = normalize_handle(a);
+            !na.is_empty() && nb.contains(&na)
+        })
 }
 
 #[async_trait]
@@ -76,6 +105,7 @@ impl SignalCli {
         account: &str,
         socket: &Path,
         data_dir: &Path,
+        mention_aliases: Vec<String>,
     ) -> anyhow::Result<(Arc<SignalCli>, mpsc::Receiver<IncomingMessage>)> {
         let bin = bin.to_string();
         let account = account.to_string();
@@ -174,7 +204,7 @@ impl SignalCli {
                                     if line.trim().is_empty() { continue; }
                                     match serde_json::from_str::<serde_json::Value>(&line) {
                                         Ok(v) => {
-                                            if let Some(msg) = parse_envelope(&v, &account) {
+                                            if let Some(msg) = parse_envelope(&v, &account, &mention_aliases) {
                                                 if tx.send(msg).await.is_err() {
                                                     // Receiver dropped: nothing left to do.
                                                     return;
@@ -269,12 +299,38 @@ mod tests {
             "source":"+1000","sourceName":"Alice","timestamp":1710000000000,
             "dataMessage":{"message":"hey @bot","mentions":[{"number":"+15555550100"}],
               "groupInfo":{"groupId":"GID=="}}}}}"#).unwrap();
-        let m = parse_envelope(&v, "+15555550100").unwrap();
+        let m = parse_envelope(&v, "+15555550100", &[]).unwrap();
         assert_eq!(m.room_id, "GID==");
         assert!(m.is_group);
         assert!(m.is_mention);
         assert_eq!(m.sender_id, "+1000");
         assert_eq!(m.body, "hey @bot");
+    }
+
+    fn group_msg(text: &str) -> serde_json::Value {
+        serde_json::json!({"method":"receive","params":{"envelope":{
+            "source":"+1000","sourceName":"Alice","timestamp":1,
+            "dataMessage":{"message":text,"groupInfo":{"groupId":"GID=="}}}}})
+    }
+
+    #[test]
+    fn text_name_addresses_bot_without_native_mention() {
+        let aliases = vec!["toxic-trash".to_string()];
+        // hyphen, space and underscore spellings all count as addressing the bot
+        for text in ["toxic-trash what do you think?", "hey toxic trash you up?", "yo TOXIC_TRASH"] {
+            let m = parse_envelope(&group_msg(text), "+15555550100", &aliases).unwrap();
+            assert!(m.is_mention, "should be addressed by name: {text:?}");
+        }
+        // the bot's own number in text also counts
+        let m = parse_envelope(&group_msg("call +15555550100 maybe"), "+15555550100", &aliases).unwrap();
+        assert!(m.is_mention);
+    }
+
+    #[test]
+    fn unrelated_group_text_is_not_addressed() {
+        let aliases = vec!["toxic-trash".to_string()];
+        let m = parse_envelope(&group_msg("anyone want tacos later"), "+15555550100", &aliases).unwrap();
+        assert!(!m.is_mention);
     }
 
     #[test]
@@ -283,7 +339,7 @@ mod tests {
           "method":"receive","params":{"envelope":{
             "source":"+1000","sourceName":"Alice","timestamp":1,
             "dataMessage":{"message":"hi"}}}}"#).unwrap();
-        let m = parse_envelope(&v, "+15555550100").unwrap();
+        let m = parse_envelope(&v, "+15555550100", &[]).unwrap();
         assert_eq!(m.room_id, "+1000");
         assert!(!m.is_group);
         assert!(!m.is_mention);
@@ -292,6 +348,6 @@ mod tests {
     #[test]
     fn non_data_message_is_none() {
         let v: serde_json::Value = serde_json::from_str(r#"{"method":"receive","params":{"envelope":{"source":"+1","receiptMessage":{}}}}"#).unwrap();
-        assert!(parse_envelope(&v, "+15555550100").is_none());
+        assert!(parse_envelope(&v, "+15555550100", &[]).is_none());
     }
 }
