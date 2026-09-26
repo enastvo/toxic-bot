@@ -21,7 +21,12 @@ use tokio::sync::Semaphore;
 /// is never skipped — `covered_through_ts` only ever advances to the last message
 /// actually fetched, so the room stays "due" and the next sweep picks up exactly
 /// where this one left off, chunk by chunk, until it catches up.
-const RECENT_CAP: i64 = 200;
+///
+/// Kept small (40) so the transcript stays well within the per-request timeout:
+/// on the CPU host a 200-message transcript pushed summary generation past the
+/// Ollama timeout and every sweep failed; ~40 messages summarizes in under a
+/// minute. Larger backlogs are still covered incrementally over multiple sweeps.
+const RECENT_CAP: i64 = 40;
 
 /// Run one summarization pass over every room with unsummarized activity.
 ///

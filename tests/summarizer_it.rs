@@ -50,7 +50,7 @@ async fn sweep_summarizes_active_room_then_gates_until_new_activity() {
     assert_eq!(summary2.covered_through_ts, 300);
 }
 
-/// A backlog bigger than the per-sweep fetch cap (200) must never leave a gap:
+/// A backlog bigger than the per-sweep fetch cap must never leave a gap:
 /// covered_through_ts should only ever advance to the last message actually
 /// fetched, so the room stays due and successive sweeps catch up chunk by
 /// chunk until every message has been folded in — no ts is ever skipped over.
@@ -59,7 +59,7 @@ async fn sweep_catches_up_incrementally_on_a_backlog_larger_than_the_cap() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     store.ensure_room("G", Some("Group"), true).await.unwrap();
 
-    const TOTAL: i64 = 205; // > RECENT_CAP (200)
+    const TOTAL: i64 = 45; // just over RECENT_CAP (40): one full chunk + a small tail
     for i in 0..TOTAL {
         store.record_message(NewMessage {
             room_id: "G".into(), sender_id: "alice".into(), sender_name: Some("Alice".into()),
