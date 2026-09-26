@@ -63,6 +63,16 @@ fn strip_own_label(reply: &str, label: &str) -> String {
     t.to_string()
 }
 
+/// A human-readable note of the current LOCAL system date/time, prepended to each
+/// reply's system prompt so any model/persona knows "now" without a tool call.
+/// Read fresh every turn; `chrono::Local` handles the host timezone and DST.
+fn current_time_note() -> String {
+    format!(
+        "Current date and time: {}.",
+        chrono::Local::now().format("%A, %B %-d, %Y, %-I:%M %p %Z")
+    )
+}
+
 /// A short, single-line preview of a (possibly long, multi-line) tool result for
 /// logging — so `journalctl` shows what a tool actually returned without dumping
 /// whole search payloads.
@@ -457,7 +467,11 @@ impl Router {
         let steer = self.store.get_steer(&room.room_id).await?;
         let chatreq = ChatRequest {
             model: personality.model.clone(),
-            system: compose_system(&personality, &room, room_summary.as_ref().map(|s| s.summary.as_str()), steer.as_deref()),
+            system: format!(
+                "{}\n\n{}",
+                current_time_note(),
+                compose_system(&personality, &room, room_summary.as_ref().map(|s| s.summary.as_str()), steer.as_deref())
+            ),
             turns,
             temperature: eff.temperature,
             top_p: eff.top_p,
@@ -647,6 +661,15 @@ mod tests {
         let r = room(ReplyMode::Addressed, true);
         assert!(!compose_system(&p, &r, None, None).contains("Earlier in this room:"));
         assert!(!compose_system(&p, &r, Some("   "), None).contains("Earlier in this room:"));
+    }
+
+    #[test]
+    fn current_time_note_has_prefix_and_year() {
+        use super::current_time_note;
+        let note = current_time_note();
+        assert!(note.starts_with("Current date and time: "), "got: {note}");
+        let year = chrono::Local::now().format("%Y").to_string();
+        assert!(note.contains(&year), "note should contain the current year {year}: {note}");
     }
 
     #[test]
