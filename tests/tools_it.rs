@@ -283,3 +283,25 @@ async fn non_operator_steer_is_treated_as_normal_message() {
     assert_eq!(out.as_deref(), Some("normal reply"), "non-operator !steer is just a message");
     assert!(store.get_steer("+rando").await.unwrap().is_none(), "must NOT set steering for a non-operator");
 }
+
+#[tokio::test]
+async fn operator_reset_clears_summary_and_steer() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    store.ensure_room("+op", None, false).await.unwrap();
+    store.upsert_summary("+op", "poetry battle in progress", 100).await.unwrap();
+    store.set_steer("+op", Some("be nice")).await.unwrap();
+    let sig = Arc::new(MockSignal::new());
+    let llm = Arc::new(MockLlm { reply: "x".into(), relevance: Relevance { should_reply: false, confidence: 0.0 } });
+    let r = Router::new(store.clone(), personalities(), llm, sig.clone(), "+bot".into(), false,
+        signal_bot::metrics::Metrics::new(), None, None, vec!["+op".into()]);
+
+    let msg = IncomingMessage { room_id: "+op".into(), sender_id: "+op".into(), sender_name: Some("Op".into()),
+        body: "!reset".into(), is_group: false, is_mention: false, quoted_msg: None, timestamp: 1 };
+    let out = r.handle(msg).await.unwrap();
+
+    assert_eq!(out, None);
+    let summ = store.get_summary("+op").await.unwrap();
+    assert!(summ.map(|s| s.summary.trim().is_empty()).unwrap_or(true), "summary should be blanked");
+    assert!(store.get_steer("+op").await.unwrap().is_none(), "steer should be cleared");
+    assert!(sig.sent.lock().unwrap()[0].1.contains("context reset"));
+}

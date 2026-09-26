@@ -159,6 +159,22 @@ pub fn parse_steer_command(body: &str) -> Option<SteerCommand> {
     Some(SteerCommand::Set(rest.to_string()))
 }
 
+/// An operator command parsed from a message body: steering or a context reset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorCommand {
+    Steer(SteerCommand),
+    /// Clear the room's rolling summary and steering directive (break a lock-in).
+    Reset,
+}
+
+/// Parse any operator command (`!steer …` or exactly `!reset`), or `None`.
+pub fn parse_operator_command(body: &str) -> Option<OperatorCommand> {
+    if body.trim().eq_ignore_ascii_case("!reset") {
+        return Some(OperatorCommand::Reset);
+    }
+    parse_steer_command(body).map(OperatorCommand::Steer)
+}
+
 /// Shared conduct rules prepended to every personality's system prompt, so
 /// they live in one place and can't drift between personality TOML files.
 /// See design spec §10 "Personality-prompt rewrite".
@@ -183,9 +199,12 @@ Mechanics: never reuse a recent opener, closer, insult, or joke, and never start
 way. Don't quote or paraphrase the whole message you're replying to. Use the [Name] prefixes to track \
 who said what, and never put one person's words in another's mouth. Do NOT begin your reply with a \
 speaker label, your own name, or a bracketed tag like \"[Name]:\" or \"[you, as ...]:\" — those are only \
-on the input; just write your message and address people by their name. Write plain conversational text \
-like a person texting — no markdown headers, no hashtags, and never append tag markers like \"$Word$\" \
-or \"$$Word$$\" to your sentences. Match length: a short message \
+on the input; just write your message and address people by their name. Write plain, modern, \
+conversational text like a person texting — no markdown headers, no hashtags, and never append tag \
+markers like \"$Word$\" or \"$$Word$$\" to your sentences. NEVER adopt verse, rhyme, meter, haiku, song \
+lyrics, or archaic/Shakespearean English (\"thou\", \"forsooth\", \"aye chum\") as your way of speaking, \
+even if recent messages — yours or anyone else's — are doing it; always snap back to normal prose. \
+Match length: a short message \
 gets a short reply. Don't \"correct\" anyone's spelling, capitalization, or emoji. If asked for something \
 impossible over Signal (e.g. posting an image), say so briefly instead of pretending to do it.";
 
@@ -354,30 +373,38 @@ impl Router {
         // as an ordinary message.
         let (commands, msgs): (Vec<IncomingMessage>, Vec<IncomingMessage>) = msgs
             .into_iter()
-            .partition(|m| self.is_operator(&m.sender_id) && parse_steer_command(&m.body).is_some());
+            .partition(|m| self.is_operator(&m.sender_id) && parse_operator_command(&m.body).is_some());
         if let Some(first) = commands.first() {
             let room_id = first.room_id.clone();
             let is_group = first.is_group;
             self.store.ensure_room(&room_id, first.sender_name.as_deref().filter(|_| !is_group), is_group).await?;
             let mut confirm = String::new();
             for m in &commands {
-                match parse_steer_command(&m.body).expect("partition guarantees a command") {
-                    SteerCommand::Set(text) => {
+                match parse_operator_command(&m.body).expect("partition guarantees a command") {
+                    OperatorCommand::Steer(SteerCommand::Set(text)) => {
                         self.store.set_steer(&room_id, Some(&text)).await?;
                         confirm = "🫡 steering set for this room.".into();
                     }
-                    SteerCommand::Clear => {
+                    OperatorCommand::Steer(SteerCommand::Clear) => {
                         self.store.set_steer(&room_id, None).await?;
                         confirm = "🫡 steering cleared for this room.".into();
                     }
-                    SteerCommand::Show => {
+                    OperatorCommand::Steer(SteerCommand::Show) => {
                         confirm = match self.store.get_steer(&room_id).await? {
                             Some(s) => format!("current steering: {s}"),
                             None => "no steering set for this room.".into(),
                         };
                     }
+                    OperatorCommand::Reset => {
+                        // Blank the rolling summary and mark everything up to this
+                        // command as already-covered, so the summarizer starts fresh
+                        // from here instead of re-chewing (and re-priming) the backlog.
+                        self.store.upsert_summary(&room_id, "", m.timestamp).await?;
+                        self.store.set_steer(&room_id, None).await?;
+                        confirm = "🧹 context reset for this room (summary + steering cleared).".into();
+                    }
                 }
-                tracing::info!(room=%room_id, cmd=%m.body, "operator steer command");
+                tracing::info!(room=%room_id, cmd=%m.body, "operator command");
             }
             if !self.dry_run && !confirm.is_empty() {
                 self.signal.send(&room_id, is_group, &confirm).await?;
@@ -670,6 +697,16 @@ mod tests {
         assert!(note.starts_with("Current date and time: "), "got: {note}");
         let year = chrono::Local::now().format("%Y").to_string();
         assert!(note.contains(&year), "note should contain the current year {year}: {note}");
+    }
+
+    #[test]
+    fn parse_operator_command_handles_steer_and_reset() {
+        use super::{parse_operator_command, OperatorCommand, SteerCommand};
+        assert_eq!(parse_operator_command("!steer be nice"), Some(OperatorCommand::Steer(SteerCommand::Set("be nice".into()))));
+        assert_eq!(parse_operator_command("!reset"), Some(OperatorCommand::Reset));
+        assert_eq!(parse_operator_command("  !RESET  "), Some(OperatorCommand::Reset));
+        assert_eq!(parse_operator_command("!reset the room now"), None); // exact !reset only
+        assert_eq!(parse_operator_command("hello"), None);
     }
 
     #[test]
