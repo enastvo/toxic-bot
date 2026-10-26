@@ -203,14 +203,30 @@ on the input; just write your message and address people by their name. Write pl
 conversational text like a person texting — no markdown headers, no hashtags, and never append tag \
 markers like \"$Word$\" or \"$$Word$$\" to your sentences. NEVER adopt verse, rhyme, meter, haiku, song \
 lyrics, or archaic/Shakespearean English (\"thou\", \"forsooth\", \"aye chum\") as your way of speaking, \
-even if recent messages — yours or anyone else's — are doing it; always snap back to normal prose. \
+even if recent messages — yours or anyone else's — are doing it; always snap back to normal prose. ";
+
+/// Default length guidance: keep it tight. Appended to `HOUSE_RULES` for every
+/// persona EXCEPT those with `rant_mode = true`. See `system_prompt`.
+const BREVITY_RULE: &str = "\
 Default to brevity and answer at the length the message actually needs. Most replies should be one or two \
 sentences. A simple question, quip, or greeting gets a simple, short answer — do not turn it into a \
 speech. Only go longer when someone genuinely asks for detail or you are actually explaining something \
 technical, and even then stay as short as you can. Never pad, never over-explain, never restate what you \
-just said to fill space. When in doubt, say less. Don't \"correct\" anyone's spelling, capitalization, or \
-emoji. If asked for something impossible over Signal (e.g. posting an image), say so briefly instead of \
-pretending to do it.";
+just said to fill space. When in doubt, say less. ";
+
+/// Length guidance for `rant_mode` personas: let them run long. The rambling,
+/// spiraling tangent IS the character, so brevity would neuter it — but a
+/// one-liner still gets a one-liner and a real question still gets an answer.
+const RANT_RULE: &str = "\
+Length is yours to run with: when you're worked up, LET IT RIP and go long — the rambling, spiraling, \
+tangent-stacking rant IS the whole point of this character, so don't you dare cut one short to be tidy. \
+Still read the room, though: a one-line jab gets a one-line jab back, and a plain factual question gets a \
+plain answer without a tangent bolted on. Go long when you're on a tear, not on everything. ";
+
+/// Trailing house rules shared by every persona, appended after the length rule.
+const HOUSE_TAIL: &str = "\
+Don't \"correct\" anyone's spelling, capitalization, or emoji. If asked for something impossible over \
+Signal (e.g. posting an image), say so briefly instead of pretending to do it.";
 
 /// The room-specific context line describing where the conversation is
 /// happening (group vs. direct message), inserted between the personality's
@@ -225,8 +241,9 @@ fn room_context_line(room: &Room) -> String {
 }
 
 pub fn system_prompt(personality: &Personality, room: &Room) -> String {
+    let length_rule = if personality.rant_mode { RANT_RULE } else { BREVITY_RULE };
     format!(
-        "{HOUSE_RULES}\n\n{}\n\n{}\n{}",
+        "{HOUSE_RULES}{length_rule}{HOUSE_TAIL}\n\n{}\n\n{}\n{}",
         personality.system_prompt.trim(),
         room_context_line(room),
         crate::context::speaker_note()
@@ -648,12 +665,26 @@ mod tests {
             top_p_override: None,
             repeat_penalty: None,
             extra_search_domains: vec![],
+            rant_mode: false,
         };
         let r = room(ReplyMode::Addressed, true);
         let s = system_prompt(&p, &r);
         assert!(s.contains("stay in character") && s.contains("Hard limits")); // raw-tone house rules
         assert!(s.contains("square brackets")); // speaker note
         assert!(s.contains("You are Sage.")); // character preserved
+        // Default persona gets the brevity rule, not the rant rule.
+        assert!(s.contains("Default to brevity") && !s.contains("LET IT RIP"));
+    }
+
+    #[test]
+    fn rant_mode_swaps_brevity_for_rant_rule() {
+        let mut p = sample_personality();
+        p.rant_mode = true;
+        let s = system_prompt(&p, &room(ReplyMode::Addressed, true));
+        // rant_mode personas lose the brevity cap and gain the "let it rip" rule.
+        assert!(s.contains("LET IT RIP") && !s.contains("Default to brevity"));
+        // Shared tail still present regardless of length mode.
+        assert!(s.contains("spelling, capitalization, or emoji"));
     }
 
     fn sample_personality() -> Personality {
@@ -673,6 +704,7 @@ mod tests {
             top_p_override: None,
             repeat_penalty: None,
             extra_search_domains: vec![],
+            rant_mode: false,
         }
     }
 

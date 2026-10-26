@@ -44,6 +44,10 @@ pub struct Personality {
     /// top of the global whitelist for its turns. Lets a persona (e.g. boomer)
     /// reach its own sources without polluting the shared whitelist.
     #[serde(default)] pub extra_search_domains: Vec<String>,
+    /// When set, this persona opts out of the shared brevity rule and gets the
+    /// "let it rip" length guidance instead, so it can rant/spiral at length.
+    /// Default `false` keeps every other persona terse. See `router::system_prompt`.
+    #[serde(default)] pub rant_mode: bool,
 }
 fn default_model() -> String { "qwen3:8b".into() }
 fn def_ctx() -> u32 { 8192 }
