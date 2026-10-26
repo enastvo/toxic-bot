@@ -152,6 +152,7 @@ mod tests {
             top_p_override: None,
             repeat_penalty: rp,
             extra_search_domains: vec![],
+            rant_mode: false,
         }
     }
 
